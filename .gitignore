@@ -1,0 +1,20 @@
+# Credentials, local configuration, and private notes
+.env
+.env.*
+*.env
+*.env.*
+/.ruqenai/
+/ruqenai.json
+/ObsidianVault/
+api-keys.json
+keystore.json
+credentials.json
+
+# Local dependencies and build outputs
+/node_modules/
+/dist/
+/.venv/
+/.screenshots/
+__pycache__/
+*.pyc
+*.log

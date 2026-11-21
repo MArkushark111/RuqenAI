@@ -1,0 +1,54 @@
+{
+  "name": "ruqenai",
+  "version": "1.0.0",
+  "description": "Terminal coding assistant with local and cloud model support",
+  "type": "module",
+  "main": "dist/index.js",
+  "bin": {
+    "ruqenai": "./bin/ruqenai.js"
+  },
+  "files": [
+    "dist",
+    "bin",
+    "asciilogoart.txt",
+    "README.md"
+  ],
+  "scripts": {
+    "start": "tsx src/index.tsx",
+    "dev": "tsx watch src/index.tsx",
+    "build": "tsc"
+  },
+  "keywords": [
+    "ai",
+    "cli",
+    "tui",
+    "ollama",
+    "mcp",
+    "subagents",
+    "openai",
+    "anthropic",
+    "gemini",
+    "deepseek",
+    "ultracode"
+  ],
+  "author": "Mark",
+  "license": "MIT",
+  "dependencies": {
+    "commander": "^13.1.0",
+    "diff": "^9.0.0",
+    "dotenv": "^16.4.7",
+    "figures": "^6.1.0",
+    "ink": "^5.1.0",
+    "ink-select-input": "^6.0.0",
+    "lowlight": "^3.3.0",
+    "react": "^18.3.1",
+    "string-width": "^7.2.0",
+    "wrap-ansi": "^9.0.2"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.9",
+    "@types/react": "^18.3.18",
+    "tsx": "^4.19.3",
+    "typescript": "^5.8.2"
+  }
+}
