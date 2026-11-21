@@ -23,6 +23,17 @@ Ruqenai brings chat, workspace tools, and model selection into one terminal inte
 
 ## Start
 
+### Install from npm
+
+Once Ruqenai is published to npm, install it globally and launch it with:
+
+```sh
+npm install -g ruqenai
+ruqenai
+```
+
+### Run from source
+
 Install Node.js and npm, open a terminal in the project folder, and run:
 
 ```sh
