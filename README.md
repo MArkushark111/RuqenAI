@@ -4,6 +4,17 @@
 
 A terminal coding assistant for local Ollama models and cloud providers.
 
+Ruqenai brings chat, workspace tools, and model selection into one terminal interface. Start a conversation in a project directory to give the assistant context for coding, exploring files, and running commands.
+
+## What you can do
+
+- Switch between installed Ollama models and configured cloud models from the model picker.
+- Work across saved conversations with tabs and the session picker.
+- Attach files and images to prompts, and review tool activity while the assistant works.
+- Choose action permissions and reasoning effort for the current workflow.
+- Connect MCP servers and use local skills, plugins, and agent profiles.
+- Run a prompt directly from the command line when you do not need the interactive interface.
+
 ## Preview
 
 ![Ruqenai demo chat with a local model](docs/media/terminal.png)
@@ -12,7 +23,14 @@ A terminal coding assistant for local Ollama models and cloud providers.
 
 ## Start
 
-Run `npm install`, then `npm start`. To use the Windows launcher, run `npm run build` and then `.\ruqenai.cmd`. If the CLI is installed or linked, use `ruqenai`.
+Install Node.js and npm, open a terminal in the project folder, and run:
+
+```sh
+npm install
+npm start
+```
+
+To use the Windows launcher, run `npm run build` and then `.\ruqenai.cmd`. If the CLI is installed or linked, use `ruqenai`. For local models, start Ollama and install a model before selecting it in Ruqenai.
 
 Each launch opens a fresh conversation with the Ruqenai wordmark. Use `/sessions` to find a saved conversation. Use `Ctrl+P` or `/help` to search commands. The model, access, activity, effort, and settings controls accept mouse clicks.
 
