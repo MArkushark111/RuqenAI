@@ -1,4 +1,6 @@
-#define AppVersion "1.1.0"
+#define AppVersion "1.1.3"
+#define AppExe "RuqenAI.exe"
+
 [Setup]
 AppId=ai.ruqenai.desktop
 AppName=Ruqenai
@@ -10,7 +12,8 @@ PrivilegesRequiredOverridesAllowed=dialog commandline
 OutputDir=..\release
 OutputBaseFilename=Ruqenai-Setup-{#AppVersion}
 SetupIconFile=assets\icon.ico
-UninstallDisplayIcon={app}\Ruqenai.exe
+UninstallDisplayIcon={app}\{#AppExe}
+CloseApplications=yes
 Compression=lzma2
 SolidCompression=yes
 WizardStyle=modern
@@ -20,15 +23,19 @@ ArchitecturesInstallIn64BitMode=x64compatible
 Name: "desktopicon"; Description: "Create a desktop shortcut"; Flags: unchecked
 [Files]
 Source: "..\release\win-unpacked\*"; DestDir: "{app}"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 [Icons]
-Name: "{group}\Ruqenai"; Filename: "{app}\Ruqenai.exe"
-Name: "{autodesktop}\Ruqenai"; Filename: "{app}\Ruqenai.exe"; Tasks: desktopicon
+Name: "{group}\Ruqenai"; Filename: "{app}\{#AppExe}"; IconFilename: "{app}\icon.ico"
+Name: "{autodesktop}\Ruqenai"; Filename: "{app}\{#AppExe}"; Tasks: desktopicon; IconFilename: "{app}\icon.ico"
 [Run]
-Filename: "{app}\Ruqenai.exe"; Description: "Launch Ruqenai"; Flags: nowait postinstall skipifsilent; Check: not UpdateRestart
-Filename: "{app}\Ruqenai.exe"; Flags: nowait; Check: UpdateRestart
+; Normal installs offer to launch the app. Silent updater installs relaunch it
+; automatically; skipifsilent would otherwise suppress both entries.
+Filename: "{app}\{#AppExe}"; Description: "Launch Ruqenai"; Flags: nowait postinstall skipifsilent; Check: not IsUpdateInstall
+Filename: "{app}\{#AppExe}"; Flags: nowait; Check: IsUpdateInstall
 
 [Code]
-function UpdateRestart(): Boolean;
+function IsUpdateInstall(): Boolean;
 begin
-  Result := Pos('/RESTARTAPP', Uppercase(GetCmdTail)) > 0;
+  Result := (Pos('/RUQENAIUPDATE', Uppercase(GetCmdTail)) > 0) or
+            (Pos('/RESTARTAPP', Uppercase(GetCmdTail)) > 0);
 end;

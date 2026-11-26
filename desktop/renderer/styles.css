@@ -1126,6 +1126,9 @@ body[data-platform='linux'] #topbar {
 .prose strong {
   font-weight: 600;
 }
+.prose .tint {
+  font-weight: 600;
+}
 
 /* Activity trace ----------------------------------------------------------- */
 
@@ -4889,6 +4892,7 @@ html[data-ultra='on'] #composer-box {
 #jump-bottom svg {
   display: block;
 }
+html[data-theme='porcelain'] #jump-bottom,
 html[data-theme='light'] #jump-bottom {
   background: linear-gradient(180deg, #fff, #f1ece3);
   color: #14120f;
@@ -5228,7 +5232,15 @@ html[data-theme='light'] mark.hl {
   background: #151515;
   box-shadow: 0 4px 16px rgb(0 0 0 / 26%);
 }
-.todos-list[hidden] { display: none; }
+/* Collapsed state animates instead of vanishing: display stays block so the
+   max-height / opacity transition can actually run. */
+.todos-list[hidden] {
+  display: block;
+  max-height: 0;
+  opacity: 0;
+  transform: translateY(6px) scaleY(.96);
+  pointer-events: none;
+}
 .todo-row {
   display: flex;
   align-items: flex-start;
@@ -5522,3 +5534,94 @@ html[data-eco='true'] #main::before { opacity: 1; }
 #chat-backdrop { transition: filter 680ms ease, opacity 680ms ease; }
 .caret { width: 8px; height: 8px; border-radius: 50%; background: var(--brand); animation: reply-breathe 1.2s ease-in-out infinite; }
 @media (prefers-reduced-motion: reduce) { #main::before, #chat-backdrop { transition-duration: 0ms; } .caret, .reply-pulse, #busy-pill #busy-label { animation: none; } }
+
+/* Hero sits higher on the empty chat: extra bottom padding pulls the centred
+   block upward without editing the base .empty rule. */
+#app.home #empty-state {
+  transform: translateY(-64px);
+}
+
+/* Imported media preview inside a scene card */
+.scene-prev .scene-clip {
+  width: 100%;
+  height: 100%;
+  object-fit: cover;
+  border-radius: 10px;
+  display: block;
+}
+
+
+/* Porcelain was near-white (#faf9f6) and the dotted backdrop washed it out
+   further. Pull the paper down to a warm grey and calm the backdrop. */
+html[data-theme='porcelain'] {
+  --paper: #eceae4;
+  --paper-2: #f5f3ee;
+  --line: #d9d5cd;
+  --line-2: #c8c3b9;
+}
+html[data-theme='porcelain'] #chat-backdrop {
+  filter: saturate(0.34) contrast(0.9) brightness(0.88);
+}
+html[data-theme='porcelain'] #app.home #chat-backdrop {
+  opacity: 0.32;
+}
+
+/* Porcelain: let the imported art read on light paper */
+html[data-theme=porcelain] #chat-backdrop,
+html[data-theme=porcelain] #video-dots{opacity:.9;mix-blend-mode:multiply;filter:saturate(.55) contrast(1.3) brightness(.9)}
+html[data-theme=porcelain] #app.home #chat-backdrop,
+html[data-theme=porcelain] #app.home #video-dots{opacity:.62}
+
+/* To-dos expand / minimise smoothly */
+.todos-list {
+  max-height: 340px;
+  opacity: 1;
+  transform: none;
+  transform-origin: 50% 100%;
+  transition: max-height 280ms cubic-bezier(.22, 1, .36, 1),
+    opacity 180ms ease,
+    transform 280ms cubic-bezier(.22, 1, .36, 1);
+}
+
+/* Clearing: the stack dissolves down into the prompt box */
+#todos.clearing .todos-list {
+  opacity: 0;
+  transform: translateY(30px) scale(.86);
+  filter: blur(3px);
+  pointer-events: none;
+  transition: opacity 220ms ease,
+    transform 260ms cubic-bezier(.22, 1, .36, 1),
+    filter 220ms ease;
+}
+#todos.clearing .todos-clear { opacity: .5; }
+
+/* Eco tints the ASCII background to match the green accent */
+html[data-eco=true] #chat-backdrop,html[data-eco=true] #video-dots{filter:hue-rotate(-96deg) saturate(1.25)}
+html[data-theme=porcelain][data-eco=true] #chat-backdrop,html[data-theme=porcelain][data-eco=true] #video-dots{filter:hue-rotate(-96deg) saturate(.72) contrast(1.3) brightness(.9)}
+/* Manage: quieter grouping */
+#manage-tabs .manage-tab{height:30px;padding:0 12px}
+#manage-pane .manage-group{margin:20px 0 8px;font-size:10px;letter-spacing:.09em}
+#manage-pane .manage-row{padding:10px 12px}
+
+/* light-mode dots must read on paper */
+html[data-theme=porcelain] #chat-backdrop,html[data-theme=porcelain] #video-dots{opacity:.85;mix-blend-mode:multiply;filter:contrast(1.55) brightness(.7)}
+html[data-theme=porcelain][data-eco=true] #chat-backdrop,html[data-theme=porcelain][data-eco=true] #video-dots{opacity:.85;mix-blend-mode:multiply;filter:hue-rotate(-96deg) contrast(1.55) brightness(.7)}
+/* manage workspace */
+.modal-card:has(#manage-pane){width:min(1120px,94vw);max-width:min(1120px,94vw);height:min(88vh,940px)}
+#manage-pane{padding:24px 26px}
+
+/* Adaptive performance mode — engaged on weak hardware or sustained low FPS.
+   Keeps every feature, drops only the expensive decorative layer. */
+html[data-perf='lite'] *,
+html[data-perf='lite'] *::before,
+html[data-perf='lite'] *::after {
+  animation-duration: 0.01ms !important;
+  animation-iteration-count: 1 !important;
+  transition-duration: 0.01ms !important;
+  backdrop-filter: none !important;
+  box-shadow: none !important;
+}
+html[data-perf='lite'] #chat-backdrop,
+html[data-perf='lite'] #video-dots {
+  opacity: 0.28 !important;
+}

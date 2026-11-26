@@ -13,6 +13,19 @@ let active = false;
 const heldKeys = new Set<string>();
 const heldButtons = new Set<string>();
 export function onComputerUse(fn?: (active: boolean) => void): void { listener = fn; }
+let paused = false;
+
+/** Esc-handed control back to the user without ending the turn. */
+export function pauseComputerUse(): void {
+  paused = true;
+  stopComputerUse();
+}
+
+/** A fresh turn may use the computer again. */
+export function resumeComputerUse(): void {
+  paused = false;
+}
+
 export function stopComputerUse(): void {
   if (active) { active = false; listener?.(false); }
   if (!heldKeys.size && !heldButtons.size) return;
@@ -121,6 +134,7 @@ export async function computerAction(input: ComputerInput, signal?: AbortSignal)
       child.once('close', (code) => { signal?.removeEventListener('abort', abort); if (code === 0) resolve(stdout.trim()); else reject(new Error(stderr.trim() || 'Computer action failed.')); });
     });
     signal?.throwIfAborted();
+    if (paused) throw new Error('The user stopped computer control. Continue without using the computer.');
     if (input.action === 'key_up' && input.key) heldKeys.delete(input.key);
     if (input.action === 'mouse_up') heldButtons.delete(input.button ?? 'left');
     const [, , width, height] = dimensions.split(',').map(Number);

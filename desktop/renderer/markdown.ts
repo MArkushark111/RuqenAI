@@ -17,6 +17,7 @@ function inlineMd(s: string): string {
     .replace(/`([^`]+)`/g, '<code>$1</code>')
     .replace(/\*\*([^*]+)\*\*/g, '<strong>$1</strong>')
     .replace(/\[highlight\]([\s\S]*?)\[\/highlight\]/gi, '<mark class="hl">$1</mark>')
+    .replace(/\[color=#([\da-f]{6})\]([^\n]+?)\[\/color\]/gi, '<span class="tint" style="color:#$1">$2</span>')
     .replace(/==([^=\n]+)==/g, '<mark class="hl">$1</mark>')
     .replace(/(^|[^*])\*([^*]+)\*/g, '$1<em>$2</em>')
     .replace(/\[([^\]]+)\]\(([^)\s]+)\)/g, '<a href="$2" target="_blank" rel="noreferrer">$1</a>');

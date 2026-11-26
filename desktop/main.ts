@@ -17,7 +17,7 @@ import * as os from 'node:os';
 import { pathToFileURL } from 'node:url';
 import { checkDesktopUpdate, installDesktopUpdate, updateState } from './updates.js';
 import { unzipSync } from 'fflate';
-import { onComputerUse, stopComputerUse } from '../src/agent/computer.js';
+import { onComputerUse, pauseComputerUse, resumeComputerUse, stopComputerUse } from '../src/agent/computer.js';
 
 let mainWindow: BrowserWindow | null = null;
 let computerOverlay: BrowserWindow | null = null;
@@ -38,9 +38,13 @@ function showComputerOverlay(active: boolean): void {
   });
   computerOverlay.setIgnoreMouseEvents(true, { forward: true });
   computerOverlay.setAlwaysOnTop(true, 'screen-saver');
-  const html = '<!doctype html><meta charset="utf-8"><style>*{box-sizing:border-box}body{margin:0;font:600 13px system-ui;color:#e7f1ff;border:3px solid #4aa8ff;box-shadow:inset 0 0 28px #258aff88;height:100vh;pointer-events:none}.badge{position:absolute;top:15px;left:50%;transform:translateX(-50%);border:1px solid #75baff99;background:#10253fe8;padding:11px 20px;border-radius:12px;box-shadow:0 0 25px #258aff77}.hint{opacity:.7;font-weight:400;margin-left:12px}</style><div class="badge">Ruqenai is using your computer<span class="hint">Esc to cancel</span></div>';
+  const html = '<!doctype html><meta charset="utf-8"><style>*{box-sizing:border-box}html,body{margin:0;height:100%;background:transparent;pointer-events:none;font:500 12.5px/1.2 ui-sans-serif,system-ui,"Segoe UI",sans-serif;color:#f4efe7}.edge{position:fixed;inset:6px;border-radius:16px;border:1px solid rgba(138,178,255,.24);box-shadow:inset 0 0 150px rgba(96,150,255,.17),inset 0 0 34px rgba(0,0,0,.26),0 0 26px rgba(96,150,255,.10)}.pill{position:fixed;top:18px;left:50%;display:flex;align-items:center;gap:10px;padding:9px 13px;border-radius:999px;background:rgba(20,19,17,.86);border:1px solid rgba(255,255,255,.12);box-shadow:0 14px 36px rgba(0,0,0,.45),inset 0 1px 0 rgba(255,255,255,.06);backdrop-filter:blur(14px) saturate(1.2);transform:translateX(-50%);animation:in 260ms cubic-bezier(.22,1,.36,1) both}@keyframes in{from{opacity:0;transform:translate(-50%,-14px) scale(.97)}}.dot{width:7px;height:7px;border-radius:50%;background:#7fb2ff;animation:pulse 1.9s ease-out infinite}@keyframes pulse{0%{box-shadow:0 0 0 0 rgba(127,178,255,.45)}70%{box-shadow:0 0 0 8px rgba(127,178,255,0)}100%{box-shadow:0 0 0 0 rgba(127,178,255,0)}}.sep{width:1px;height:14px;background:rgba(255,255,255,.14)}.key{font:600 10.5px/1 ui-monospace,Consolas,monospace;padding:4px 6px;border-radius:6px;border:1px solid rgba(255,255,255,.18);background:rgba(255,255,255,.07);color:#d9d3c9}.hint{color:#a8a09a;font-weight:400}</style><div class="edge"></div><div class="pill"><span class="dot"></span><span>Ruqenai is using your computer</span><span class="sep"></span><span class="key">Esc</span><span class="hint">stop</span></div>';
   void computerOverlay.loadURL('data:text/html;charset=utf-8,' + encodeURIComponent(html));
-  globalShortcut.register('Escape', () => { activeController?.abort(); stopComputerUse(); });
+  globalShortcut.register('Escape', () => {
+      // Hand control back without aborting the turn: the next computer action
+      // returns an error to the model, which then answers normally.
+      pauseComputerUse();
+    });
 }
 
 /**
@@ -151,6 +155,7 @@ async function runTurn(sessionId: string, prompt: string): Promise<void> {
 
   const controller = new AbortController();
   activeController = controller;
+  resumeComputerUse();
   const cwd = cwdFor(sessionId);
 
   try {
@@ -223,6 +228,27 @@ function createWindow(): void {
 
   mainWindow.loadFile(path.join(__dirname, 'renderer', 'index.html'));
 
+  // Own the zoom keys instead of relying on Chromium's default accelerator.
+  // On many layouts "Ctrl +" arrives as Ctrl+Shift+=, which the default misses,
+  // leaving the window stuck zoomed out after an accidental Ctrl+-.
+  const ZOOM_MIN = -3;
+  const ZOOM_MAX = 3;
+  mainWindow.webContents.on('before-input-event', (event, input) => {
+    if (input.type !== 'keyDown' || !(input.control || input.meta) || input.alt) return;
+    const key = input.key.toLowerCase();
+    const code = (input as { code?: string }).code ?? '';
+    let step = 0;
+    let reset = false;
+    if (key === '=' || key === '+' || code === 'NumpadAdd') step = 1;
+    else if (key === '-' || key === '_' || code === 'NumpadSubtract') step = -1;
+    else if (key === '0' || code === 'Numpad0') reset = true;
+    if (!step && !reset) return;
+    event.preventDefault();
+    const wc = mainWindow?.webContents;
+    if (!wc) return;
+    wc.setZoomLevel(reset ? 0 : Math.max(ZOOM_MIN, Math.min(ZOOM_MAX, wc.getZoomLevel() + step)));
+  });
+
   // Surface renderer console messages to the main process log (helps diagnose UI errors).
   mainWindow.webContents.on('console-message', (_e: unknown, levelOrDetails: unknown, message?: string) => {
     const text = typeof message === 'string' ? message : (levelOrDetails as { message?: string })?.message;
@@ -285,6 +311,11 @@ function registerIpc(): void {
   ipcMain.handle('config:setCustomCss', (_e, css: string) => {
     configManager.update({ customCss: String(css ?? '').slice(0, 200_000) });
     return { ok: true };
+  });
+
+  ipcMain.handle('view:zoomReset', () => {
+    mainWindow?.webContents.setZoomLevel(0);
+    return true;
   });
 
   ipcMain.handle('home:setSceneName', (_e, scene: string) => {
@@ -815,6 +846,12 @@ function registerIpc(): void {
   });
 
   ipcMain.handle('chat:list', () => chatList());
+
+  ipcMain.handle('system:hardware', () => ({
+    cores: os.cpus().length,
+    memoryGb: Math.round(os.totalmem() / 1024 ** 3),
+    platform: process.platform,
+  }));
 
   ipcMain.handle('project:list', () => store.projects);
 

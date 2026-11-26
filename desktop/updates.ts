@@ -121,7 +121,7 @@ export async function installDesktopUpdate(): Promise<void> {
   if (!installer || updateState().status !== 'ready') throw new Error('Download an update first.');
   await fs.access(installer);
   await new Promise<void>((resolve, reject) => {
-    const child = spawn(installer!, ['/RESTARTAPP', '/CLOSEAPPLICATIONS'], { detached: true, stdio: 'ignore' });
+    const child = spawn(installer!, ['/VERYSILENT', '/SUPPRESSMSGBOXES', '/NORESTART', '/CLOSEAPPLICATIONS', '/RUQENAIUPDATE'], { detached: true, stdio: 'ignore' });
     child.once('error', reject);
     child.once('spawn', () => { child.unref(); resolve(); });
   });

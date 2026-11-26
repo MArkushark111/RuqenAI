@@ -1,6 +1,7 @@
 const { name, version, description, author, license } = require('./package.json');
 
 module.exports = {
+  extraMetadata: { main: 'dist-desktop/main.js' },
   appId: 'ai.ruqenai.desktop',
   productName: 'RuqenAI',
   copyright: `Copyright (c) ${new Date().getFullYear()} ${author}`,

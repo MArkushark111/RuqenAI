@@ -207,6 +207,29 @@ const tools: Tool[] = [
     },
   },
   {
+    name: 'wait',
+    title: 'Wait',
+    subject: 'seconds',
+    description: 'Pause when something is visibly still loading — a build, an install, a page, a long command. Waits a bounded number of seconds, then returns so you can look again. Use this instead of re-running a command in a tight loop.',
+    inputSchema: objectSchema({
+      seconds: { type: 'integer', minimum: 1, maximum: 30, description: 'Seconds to wait. Defaults to 2.' },
+      reason: { type: 'string', description: 'Short note shown in the task list, for example "waiting for npm install".' },
+    }),
+    async run(args, context) {
+      const seconds = Math.min(30, Math.max(1, positiveInt(args, 'seconds') ?? 2));
+      const reason = args.reason === undefined ? '' : stringArg(args, 'reason');
+      context.signal?.throwIfAborted();
+      await new Promise<void>((resolve, reject) => {
+        const timer = setTimeout(resolve, seconds * 1000);
+        context.signal?.addEventListener('abort', () => {
+          clearTimeout(timer);
+          reject(new Error('Wait cancelled.'));
+        }, { once: true });
+      });
+      return { status: 'completed' as const, text: `Waited ${seconds}s${reason ? ` — ${reason}` : ''}. Re-check the current state before acting.` };
+    },
+  },
+  {
     name: 'read_file',
     title: 'Read file',
     subject: 'path',

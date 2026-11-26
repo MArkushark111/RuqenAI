@@ -143,6 +143,8 @@ interface Api {
     root?: string,
   ): Promise<{ extensions: MentionItem[]; files: MentionItem[] }>;
   gitInfo(root?: string): Promise<{ isRepo: boolean; branch: string | null; name: string }>;
+  hardware(): Promise<{ cores: number; memoryGb: number; platform: string }>;
+  zoomReset(): Promise<boolean>;
   listModels(): Promise<ModelList>;
   setModel(provider: string, model: string): Promise<boolean>;
   createChat(projectPath?: string): Promise<{ id: string; name: string; project: string }>;
@@ -180,6 +182,64 @@ interface Api {
 }
 
 const api = (window as unknown as { ruqenai: Api }).ruqenai;
+
+// ---------------------------------------------------------------------------
+// Adaptive performance: detect weak hardware, then watch real frame rate.
+// Lite mode strips the expensive visual layer without changing functionality.
+// ---------------------------------------------------------------------------
+
+const PERF_KEY = 'ruqenai.perf';
+
+function isLite(): boolean {
+  return document.documentElement.dataset.perf === 'lite';
+}
+
+function enableLiteMode(): void {
+  if (isLite()) return;
+  document.documentElement.dataset.perf = 'lite';
+  try { localStorage.setItem(PERF_KEY, 'lite'); } catch { /* ignore */ }
+}
+
+function watchFrameRate(): void {
+  let frames = 0;
+  let start = 0;
+  let slowSamples = 0;
+  const reset = (): void => { frames = 0; start = 0; slowSamples = 0; };
+  document.addEventListener('visibilitychange', reset);
+  const sample = (now: number): void => {
+    if (isLite()) return;
+    if (document.hidden) { reset(); requestAnimationFrame(sample); return; }
+    if (!start) { start = now; frames = 0; requestAnimationFrame(sample); return; }
+    frames++;
+    const span = now - start;
+    if (span >= 1500) {
+      const fps = frames * 1000 / span;
+      slowSamples = fps < 42 ? slowSamples + 1 : 0;
+      if (slowSamples >= 2) { enableLiteMode(); return; }
+      frames = 0;
+      start = now;
+    }
+    requestAnimationFrame(sample);
+  };
+  requestAnimationFrame(sample);
+}
+
+async function initPerformance(): Promise<void> {
+  try {
+    if (localStorage.getItem(PERF_KEY) === 'lite') { enableLiteMode(); return; }
+  } catch { /* ignore */ }
+  let low = false;
+  try {
+    const hw = await api.hardware();
+    const cores = Math.min(hw.cores || 8, navigator.hardwareConcurrency || 8);
+    const memory = (navigator as Navigator & { deviceMemory?: number }).deviceMemory ?? hw.memoryGb ?? 8;
+    low = cores <= 4 || memory <= 4;
+  } catch {
+    low = (navigator.hardwareConcurrency || 8) <= 4;
+  }
+  if (low) enableLiteMode();
+  else watchFrameRate();
+}
 
 interface DesktopUpdate {
   status: string;
@@ -275,9 +335,33 @@ const todosClear = $('#todos .todos-clear') as HTMLButtonElement;
 let clearingTodos = false;
 
 function setTodosOpen(open: boolean): void {
-  todos.classList.toggle('open', open);
-  todosList.hidden = !open;
-  todosHead.setAttribute('aria-expanded', String(open));
+  const panel = $('#todos');
+  const list = $('#todos .todos-list') as HTMLElement | null;
+  if (!panel || !list) return;
+  panel.classList.toggle('open', open);
+  $('#todos .todos-head')?.setAttribute('aria-expanded', open ? 'true' : 'false');
+  // The list is hidden with [hidden]; unhide first or there is no frame to animate from.
+  list.hidden = false;
+  const height = list.scrollHeight;
+  list.style.overflow = 'hidden';
+  for (const running of list.getAnimations()) running.cancel();
+  const frames = open
+    ? [
+        { maxHeight: '0px', opacity: 0, transform: 'translateY(8px) scaleY(.96)' },
+        { maxHeight: height + 'px', opacity: 1, transform: 'none' },
+      ]
+    : [
+        { maxHeight: height + 'px', opacity: 1, transform: 'none' },
+        { maxHeight: '0px', opacity: 0, transform: 'translateY(8px) scaleY(.96)' },
+      ];
+  const animation = list.animate(frames, {
+    duration: open ? 280 : 220,
+    easing: open ? 'cubic-bezier(.22,1,.36,1)' : 'cubic-bezier(.4,0,.2,1)',
+  });
+  animation.onfinish = () => {
+    list.style.overflow = '';
+    if (!open) list.hidden = true;
+  };
 }
 
 function renderTodos(): void {
@@ -316,8 +400,26 @@ todosClear.onclick = async () => {
   const id = currentSessionId;
   if (!id || busy || clearingTodos) return;
   clearingTodos = true;
-  todosClear.disabled = true;
-  try {
+    todosClear.disabled = true;
+    const todosPanel = document.getElementById('todos');
+    const todosList = todosPanel?.querySelector('.todos-list') as HTMLElement | null;
+    if (todosList) {
+      // Dissolve the stack down into the composer before the rows are dropped.
+      const height = todosList.offsetHeight;
+      todosList.hidden = false;
+      todosList.style.overflow = 'hidden';
+      for (const running of todosList.getAnimations()) running.cancel();
+      const dissolve = todosList.animate(
+        [
+          { maxHeight: height + 'px', opacity: 1, transform: 'none', filter: 'blur(0px)' },
+          { maxHeight: '0px', opacity: 0, transform: 'translateY(32px) scale(.86)', filter: 'blur(3px)' },
+        ],
+        { duration: 260, easing: 'cubic-bezier(.22,1,.36,1)' },
+      );
+      await dissolve.finished.catch(() => undefined);
+      todosList.style.overflow = '';
+    }
+    try {
     if (!await api.clearTasks(id)) throw new Error('Could not clear to-dos.');
     if (currentSessionId !== id) return;
     currentMessages = currentMessages.map((message) => message.tasks
@@ -677,7 +779,7 @@ function newSegment(state: StreamState): Segment {
 
 function ensureActions(state: StreamState): HTMLElement {
   if (!state.current.fold) {
-    const el = actionFold(liveTasks, true);
+    const el = actionFold(liveTasks);
     state.current.root.appendChild(el);
     state.current.fold = el;
   }
@@ -778,11 +880,12 @@ let tasksTimer = 0;
 
 function paintTasks(state: StreamState): void {
   const existing = state.current.fold;
-  const fresh = actionFold(liveTasks, true);
+  const fresh = actionFold(liveTasks);
   if (existing) {
     const wasOpen = existing.classList.contains('open');
     existing.replaceWith(fresh);
     fresh.classList.toggle('open', wasOpen);
+    fresh.querySelector('.fold-head')?.setAttribute('aria-expanded', String(wasOpen));
   } else {
     state.current.root.appendChild(fresh);
   }
@@ -931,6 +1034,10 @@ const videoSample = document.createElement('canvas');
 let videoSource = '';
 let videoFrameTimer = 0;
 
+function dotStep(): number {
+  return isLite() ? 9 : 5;
+}
+
 function paintVideoDots(): void {
   if (video.paused || video.readyState < 2 || document.hidden) return;
   const out = videoDots.getContext('2d');
@@ -938,7 +1045,7 @@ function paintVideoDots(): void {
   const width = 840;
   const height = Math.max(320, Math.min(700, Math.round(width * video.videoHeight / Math.max(1, video.videoWidth))));
   if (videoDots.width !== width || videoDots.height !== height) { videoDots.width = width; videoDots.height = height; }
-  const step = 8;
+  const step = dotStep();
   const sample = videoSample;
   if (sample.width !== Math.ceil(width / step) || sample.height !== Math.ceil(height / step)) {
     sample.width = Math.ceil(width / step); sample.height = Math.ceil(height / step);
@@ -951,9 +1058,9 @@ function paintVideoDots(): void {
   for (let y = 0; y < sample.height; y++) for (let x = 0; x < sample.width; x++) {
     const i = (y * sample.width + x) * 4;
     const light = (pixels[i] * .2126 + pixels[i + 1] * .7152 + pixels[i + 2] * .0722) / 255;
-    if (light < .1) continue;
-    out.fillStyle = `rgba(${pixels[i]},${pixels[i + 1]},${pixels[i + 2]},${.16 + light * .65})`;
-    out.beginPath(); out.arc(x * step + 4, y * step + 4, .5 + light * 2.2, 0, Math.PI * 2); out.fill();
+    if (light < .05) continue;
+    out.fillStyle = `rgba(${pixels[i]},${pixels[i + 1]},${pixels[i + 2]},${.34 + light * .66})`;
+    out.beginPath(); out.arc(x * step + step / 2, y * step + step / 2, .45 + light * 1.9, 0, Math.PI * 2); out.fill();
   }
 }
 
@@ -964,7 +1071,7 @@ function syncVideoDots(show: boolean): void {
   if (!show || !homeBg.background) { video.pause(); return; }
   if (videoSource !== homeBg.background) { videoSource = homeBg.background; video.src = videoSource; }
   void video.play().catch(() => {});
-  videoFrameTimer = window.setInterval(paintVideoDots, 100);
+  videoFrameTimer = window.setInterval(paintVideoDots, isLite() ? 200 : 100);
 }
 
 /** Rasterize an imported photo to a fixed dot grid once, off the animation loop. */
@@ -975,7 +1082,7 @@ function updateImportedDots(source: string): void {
   img.onload = () => {
     const width = 840;
     const height = Math.max(320, Math.min(700, Math.round(width * img.naturalHeight / Math.max(1, img.naturalWidth))));
-    const step = 7;
+    const step = dotStep();
     const sample = document.createElement('canvas');
     sample.width = Math.ceil(width / step);
     sample.height = Math.ceil(height / step);
@@ -990,10 +1097,10 @@ function updateImportedDots(source: string): void {
         const i = (y * sample.width + x) * 4;
         const alpha = pixels[i + 3] / 255;
         const light = (0.2126 * pixels[i] + 0.7152 * pixels[i + 1] + 0.0722 * pixels[i + 2]) / 255;
-        if (alpha < 0.1 || light < 0.08) continue;
-        ctx.fillStyle = `rgba(${pixels[i]},${pixels[i + 1]},${pixels[i + 2]},${Math.min(0.9, alpha * (0.16 + light * 0.8))})`;
+        if (alpha < 0.07 || light < 0.03) continue;
+        ctx.fillStyle = `rgba(${pixels[i]},${pixels[i + 1]},${pixels[i + 2]},${Math.min(0.96, alpha * (0.34 + light * 0.66))})`;
         ctx.beginPath();
-        ctx.arc(x * step + 3, y * step + 3, 0.6 + light * 2.15, 0, Math.PI * 2);
+        ctx.arc(x * step + step / 2, y * step + step / 2, 0.5 + light * 1.95, 0, Math.PI * 2);
         ctx.fill();
       }
       dottedImageSource = source;
@@ -1023,7 +1130,7 @@ function applyHomeBg(): void {
   sceneCanvas.hidden = !showCanvas;
   if (mountedScene !== (showCanvas ? scene.id : undefined)) {
     stopBackdrop?.();
-    stopBackdrop = showCanvas ? mount(sceneCanvas as HTMLCanvasElement, scene.piece, { fps: 10 }) : undefined;
+    stopBackdrop = showCanvas ? mount(sceneCanvas as HTMLCanvasElement, scene.piece, { fps: isLite() ? 6 : 10 }) : undefined;
     mountedScene = showCanvas ? scene.id : undefined;
   }
   const starters = emptyState.querySelector<HTMLElement>('#starters');
@@ -2289,6 +2396,8 @@ function renderAttachTray(): void {
   if (!attached.length) {
     attachTray.classList.add('hidden');
     attachTray.innerHTML = '';
+    // The box grew to fit the chips — put the prompt back to its natural height.
+    promptEl.style.height = 'auto';
     return;
   }
   attachTray.classList.remove('hidden');
@@ -2504,7 +2613,33 @@ function wireAttach(): void {
 // Chat lifecycle
 // ---------------------------------------------------------------------------
 
+function isEmptyUntitled(meta: ChatMeta | undefined): boolean {
+  return Boolean(meta && meta.name === 'Untitled' && (meta.messageCount ?? 0) === 0);
+}
+
+/** Drop Untitled chats that were opened but never used (no messages, no files). */
+async function pruneEmptyUntitledChats(keepId: string | null = null): Promise<void> {
+  if (busy) return; // never touch a chat that is currently streaming
+  const stale = chatsCache.filter((meta) =>
+    meta.id !== keepId && isEmptyUntitled(meta));
+  if (!stale.length) return;
+  const removed: string[] = [];
+  for (const meta of stale) {
+    try {
+      const files = await api.attachList(meta.id);
+      if (files?.length) continue; // attachments make it a used chat
+      await api.deleteChat(meta.id);
+      removed.push(meta.id);
+    } catch { /* keep the chat if cleanup fails */ }
+  }
+  if (!removed.length) return;
+  chatsCache = chatsCache.filter((meta) => !removed.includes(meta.id));
+  if (removed.includes(currentSessionId ?? '')) currentSessionId = null;
+  renderSidebar();
+}
+
 function newChat(): void {
+  void pruneEmptyUntitledChats();
   currentSessionId = null;
   document.documentElement.dataset.eco = 'false';
   void api.getConfig().then(cfg => {
@@ -2530,6 +2665,7 @@ function newChat(): void {
 }
 
 async function openChat(id: string): Promise<void> {
+  await pruneEmptyUntitledChats(id);
   let data: { id: string; name: string; project: string | null; messages: ChatMessage[]; effort?: EffortState };
   try {
     data = await api.openChat(id);
@@ -3038,6 +3174,9 @@ async function renderManagePane(): Promise<void> {
         { label: 'Shift Enter', summary: 'New line' },
         { label: '@', summary: 'Mention a file, skill or MCP server' },
         { label: 'Esc', summary: 'Close the open panel' },
+        { label: 'Ctrl +', summary: 'Zoom in' },
+        { label: 'Ctrl -', summary: 'Zoom out' },
+        { label: 'Ctrl 0', summary: 'Reset zoom to 100%' },
       ]);
     return;
   }
@@ -3134,6 +3273,9 @@ async function renderManagePane(): Promise<void> {
     );
     pane.insertAdjacentHTML(
       'beforeend',
+      '<div class="manage-row"><span class="manage-row-label">Display zoom</span>' +
+        '<span class="manage-row-sub">Reset to 100% if the window got zoomed by accident</span>' +
+        '<span class="manage-inline"><button type="button" class="ghost-btn sm" id="zoom-reset">Reset zoom</button></span></div>' +
       '<details id="appearance-advanced" class="appearance-advanced"><summary>Custom CSS</summary>' +
         '<textarea id="custom-css" class="manage-css" aria-label="Custom CSS" spellcheck="false" placeholder=":root { --accent: #7c9bff; }"></textarea>' +
         '<div class="manage-inline">' +
@@ -3160,6 +3302,9 @@ async function renderManagePane(): Promise<void> {
         await (api as unknown as { setCustomCss(v: string): Promise<unknown> }).setCustomCss('');
       };
     }
+    const zoomReset = document.getElementById('zoom-reset');
+    if (zoomReset) zoomReset.onclick = () => void api.zoomReset();
+
     const sceneChoices = [
       { id: 'rotate', label: 'Rotate scenes' },
       ...BACKDROP_SCENES,
@@ -3194,8 +3339,20 @@ async function renderManagePane(): Promise<void> {
         host.append(canvas);
         scenePreviews.push({ stop: mount(canvas, piece, { fps: 0 }) });
       } else if (host && name === 'image') {
-        if (homeBg.mediaKind === 'video') host.textContent = 'VIDEO';
-        else host.style.backgroundImage = dottedImageUrl ? `url("${dottedImageUrl}")` : 'none';
+        if (homeBg.mediaKind === 'video' && homeBg.background) {
+            const clip = document.createElement('video');
+            clip.src = homeBg.background;
+            clip.muted = true;
+            clip.playsInline = true;
+            clip.preload = 'metadata';
+            clip.className = 'scene-clip';
+            clip.addEventListener('loadeddata', () => {
+              try { clip.currentTime = Math.min(0.7, (clip.duration || 1) * 0.25); } catch { /* keep frame 0 */ }
+            });
+            host.append(clip);
+          } else {
+        host.style.backgroundImage = dottedImageUrl ? `url("${dottedImageUrl}")` : 'none';
+          }
       } else if (host) {
         host.innerHTML = icon('more');
       }
@@ -3860,7 +4017,9 @@ async function boot(): Promise<void> {
   provProjects = data.projects ?? [];
   activeProject = data.activeProject ?? null;
   chatsCache = data.chats ?? [];
+  await pruneEmptyUntitledChats();
   renderSidebar();
+  void initPerformance();
   void updateWorkspaceChip();
   await refreshModels();
 
