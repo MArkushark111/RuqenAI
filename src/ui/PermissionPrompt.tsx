@@ -1,7 +1,7 @@
 import React, { useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import { PermissionRequest } from '../agent/permissions.js';
-import { colors, fit, wrapLines } from './terminal.js';
+import { colors, fill, wrapLines } from './terminal.js';
 import { ActionRow } from './ActionRow.js';
 import { useMouse } from './MouseListener.js';
 
@@ -13,11 +13,30 @@ interface PermissionPromptProps {
   y: number;
 }
 
+function permissionLines(request: PermissionRequest, width: number) {
+  return wrapLines(request.description || request.target, Math.max(1, width - 3), true);
+}
+
+export function permissionHeight(request: PermissionRequest, width: number) {
+  return Math.min(16, permissionLines(request, width).length + (request.rememberScope ? 6 : 4));
+}
+
 export function PermissionPrompt({ request, width, height, x, y }: PermissionPromptProps) {
   const [offset, setOffset] = useState(0);
-  const canRemember = request.type === 'shell' || request.type === 'file_write';
-  const lines = wrapLines(request.description || request.target, width);
-  const pageSize = Math.max(1, height - 2);
+  const [selected, select] = useState(0);
+  const choices = [
+    { key: 'n', number: '3', label: 'Deny', color: colors.error, run: () => request.onDecide(false) },
+    { key: 'y', number: '1', label: 'Allow once', color: colors.ink, run: () => request.onDecide(true) },
+    ...(request.rememberScope ? [{
+      key: 'a', number: '2', label: 'Always allow', color: colors.warning, run: () => request.onDecide(true, true),
+    }] : []),
+  ];
+  const displayOrder = [...choices.slice(1), choices[0]];
+  const compact = height < choices.length + 2;
+  const showScope = Boolean(request.rememberScope && height >= choices.length + 4);
+  const showHelp = height >= choices.length + 3;
+  const lines = permissionLines(request, width);
+  const pageSize = Math.max(0, height - 1 - (compact ? 1 : choices.length) - Number(showScope) - Number(showHelp));
   const maxOffset = Math.max(0, lines.length - pageSize);
   const start = Math.min(offset, maxOffset);
   const move = (delta: number) => setOffset(Math.max(0, Math.min(maxOffset, start + delta)));
@@ -28,35 +47,44 @@ export function PermissionPrompt({ request, width, height, x, y }: PermissionPro
   });
   useInput((input, key) => {
     if (key.ctrl || (key.meta && !key.escape)) return;
-    if (key.pageUp || key.pageDown || key.upArrow || key.downArrow) {
-      const delta = key.pageUp ? -pageSize : key.pageDown ? pageSize : key.upArrow ? -1 : 1;
-      move(delta);
+    if (key.pageUp || key.pageDown) {
+      move(key.pageUp ? -pageSize : pageSize);
       return;
     }
-    const letter = input.toLowerCase();
-    if (key.escape || letter === 'n' || letter === '3') {
-      request.onDecide(false, false);
-    } else if (key.return || input === '\n' || input === '\r\n' || letter === 'y' || letter === '1') {
-      request.onDecide(true, false);
-    } else if (canRemember && (letter === 'a' || letter === '2')) {
-      request.onDecide(true, true);
+    if (key.upArrow || key.downArrow || key.tab) {
+      const index = displayOrder.indexOf(choices[selected]);
+      const next = (index + displayOrder.length + (key.upArrow || key.shift ? -1 : 1)) % displayOrder.length;
+      select(choices.indexOf(displayOrder[next]));
+      return;
     }
+    if (key.escape) choices[0].run();
+    else if (key.return) choices[selected].run();
+    else choices.find(({ key: shortcut, number }) => shortcut === input.toLowerCase() || number === input)?.run();
   });
 
-  const choices = [
-    { label: 'Y Allow once', run: () => request.onDecide(true, false) },
-    ...(canRemember ? [{ label: width >= 56 ? 'A Always allow' : 'A Always', run: () => request.onDecide(true, true) }] : []),
-    { label: 'N Deny', run: () => request.onDecide(false, false) },
-  ];
   const shown = lines.slice(start, start + pageSize);
+  const options = compact ? [choices[selected]] : displayOrder;
 
   return (
-    <Box flexDirection="column" flexShrink={0} height={height}>
-      <Text bold color={colors.warning}>
-        {fit(maxOffset ? `Permission required  ·  ↑/↓ to read  ${start + 1}–${Math.min(lines.length, start + pageSize)}/${lines.length}` : 'Permission required', width)}
+    <Box flexDirection="column" width={width} flexShrink={0} height={height}>
+      <Text bold color={colors.surface} backgroundColor={colors.warning}>
+        {fill(' Permission required' + (maxOffset && pageSize ? `  ·  Lines ${start + 1}–${start + shown.length}/${lines.length}` : ''), width)}
       </Text>
-      {shown.map((line, index) => <Text key={start + index}>{line || ' '}</Text>)}
-      <ActionRow actions={choices} width={width} x={x} y={y + 1 + shown.length} />
+      {shown.map((line, index) => <Text key={start + index} color={colors.ink} backgroundColor={colors.board}>
+        {fill('  ' + line, width)}
+      </Text>)}
+      {options.map((choice, index) => <ActionRow key={choice.key} width={width} x={x} y={y + 1 + shown.length + index}
+        background={colors.board} actions={[{
+          ...choice,
+          label: fill(` ${choice === choices[selected] ? '›' : ' '}  ${choice.label}  [${choice.key.toUpperCase()}]`, width),
+          selected: choice === choices[selected],
+        }]} />)}
+      {showScope && <Text color={colors.ink} backgroundColor={colors.board}>
+        {fill(' Remembers ' + request.rememberScope + '.', width)}
+      </Text>}
+      {showHelp && <Text color={colors.muted} backgroundColor={colors.board}>
+        {fill(maxOffset ? ' PgUp/PgDn Details  ↑↓ Select  Esc Deny' : ' ↑↓ Select  Enter Confirm  Esc Deny', width)}
+      </Text>}
     </Box>
   );
 }

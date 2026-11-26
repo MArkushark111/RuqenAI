@@ -9,12 +9,21 @@
 api-keys.json
 keystore.json
 credentials.json
+mobile-host.json
+/android/.gradle/
+/android/**/build/
+/android/local.properties
 
 # Local dependencies and build outputs
 /node_modules/
 /dist/
+/dist-desktop/
+/release/
 /.venv/
 /.screenshots/
 __pycache__/
 *.pyc
 *.log
+
+# Local promotional videos
+*.mp4

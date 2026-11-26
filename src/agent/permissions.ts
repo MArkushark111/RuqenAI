@@ -1,4 +1,4 @@
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import { PermissionMode } from '../types/index.js';
 import { configManager } from '../config/settings.js';
 
@@ -7,6 +7,7 @@ export interface PermissionRequest {
   type: 'shell' | 'file_write' | 'file_delete' | 'network';
   target: string;
   description: string;
+  rememberScope?: string;
   onDecide: (allowed: boolean, alwaysAllow?: boolean) => void;
 }
 
@@ -42,19 +43,26 @@ export class PermissionManager {
     description: string,
     signal?: AbortSignal,
     mode = this.getMode(),
+    mcpAction?: readonly unknown[],
   ): Promise<boolean> {
     signal?.throwIfAborted();
     if (mode === 'full') return true;
 
     const config = configManager.get();
+    const mcpApproval = type === 'network' && mcpAction
+      ? createHash('sha256').update(JSON.stringify([target, ...mcpAction])).digest('hex')
+      : undefined;
     if (type === 'shell' && config.approvedCommands.includes(target)) return true;
     if (type === 'file_write' && config.approvedPaths.includes(target)) return true;
+    if (mcpApproval && config.approvedMcpActions.includes(mcpApproval)) return true;
     if (mode === 'approve' && type === 'shell' && safeCommands.has(target)) return true;
     if (!this.requestListener) return false;
 
     return new Promise<boolean>((resolve) => {
       const request: PermissionRequest = {
         id: randomUUID(), type, target, description,
+        rememberScope: mcpApproval ? 'this exact MCP action' : type === 'shell' ? 'this exact command'
+          : type === 'file_write' ? 'writes to this file' : undefined,
         onDecide: (allowed, alwaysAllow) => {
           const index = this.queue.indexOf(request);
           if (index < 0) return;
@@ -67,6 +75,8 @@ export class PermissionManager {
               configManager.update({ approvedCommands: [...current.approvedCommands, target] });
             } else if (type === 'file_write' && !current.approvedPaths.includes(target)) {
               configManager.update({ approvedPaths: [...current.approvedPaths, target] });
+            } else if (mcpApproval && !current.approvedMcpActions.includes(mcpApproval)) {
+              configManager.update({ approvedMcpActions: [...current.approvedMcpActions, mcpApproval] });
             }
           }
 

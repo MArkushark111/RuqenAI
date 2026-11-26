@@ -1,7 +1,8 @@
-import React, { useEffect, useLayoutEffect, useState } from 'react';
+import React, { useEffect, useLayoutEffect, useMemo, useState } from 'react';
 import { Box, Text, useInput } from 'ink';
 import stringWidth from 'string-width';
-import { cleanText, colors, fit, graphemes } from './terminal.js';
+import { cleanText, colors, fill, fit, graphemes } from './terminal.js';
+import { mentionAt, suggestMentions } from '../agent/mentions.js';
 import { useMouse } from './MouseListener.js';
 import { suggestCommands } from './commandSuggestions.js';
 import { canonicalCommand } from '../commands/catalog.js';
@@ -35,19 +36,26 @@ export function Composer({ width, accent, active, history, prefill, insertion, x
   const [draft, setDraft] = useState('');
   const [selection, setSelection] = useState(0);
   const [dismissed, setDismissed] = useState<string>();
-  const suggestions = active && maxSuggestionRows && value !== dismissed ? suggestCommands(value) : [];
+  const segments = graphemes(value);
+  const offset = segments.slice(0, cursor).join('').length;
+  const canSuggest = active && maxSuggestionRows > 0 && value !== dismissed;
+  const mention = canSuggest && !value.startsWith('/') ? mentionAt(value, offset) : undefined;
+  const token = mention?.token;
+  const mentions = useMemo(() => token ? suggestMentions(token) : [], [token]);
+  const suggestions = !canSuggest ? [] : mention ? mentions : suggestCommands(value)
+    .map(({ command, summary }) => ({ label: '/' + command, summary }));
   const suggestion = suggestions[selection] ?? suggestions[0];
   const firstRow = Math.max(0, selection - maxSuggestionRows + 1);
   const visibleRows = suggestions.slice(firstRow, firstRow + maxSuggestionRows);
-  const labelWidth = Math.min(17, Math.floor(width / 2));
+  const labelWidth = Math.min(mention ? 34 : 17, Math.floor(width * 0.6));
   const inputY = y + visibleRows.length;
   useLayoutEffect(() => {
     onSuggestionRows(visibleRows.length);
   }, [visibleRows.length, onSuggestionRows]);
-  const segments = graphemes(value);
-  const offset = segments.slice(0, cursor).join('').length;
   useEffect(() => {
     setSelection(0);
+  }, [value, token]);
+  useEffect(() => {
     setDismissed(undefined);
   }, [value]);
 
@@ -66,10 +74,12 @@ export function Composer({ width, accent, active, history, prefill, insertion, x
     setCursor(graphemes(before).length);
   }, [insertion]);
 
-  function complete(command: string) {
-    const text = '/' + command + ' ';
-    setValue(text);
-    setCursor(text.length);
+  function complete(label: string) {
+    const after = mention ? value.slice(mention.end) : '';
+    const before = (mention ? value.slice(0, mention.start) : '') + label;
+    const separator = /^\s/.test(after) ? '' : ' ';
+    setValue(before + separator + after);
+    setCursor(graphemes(before + separator).length + Number(!separator && after.startsWith(' ')));
     setHistoryIndex(-1);
   }
 
@@ -128,7 +138,7 @@ export function Composer({ width, accent, active, history, prefill, insertion, x
     }
     if (key.ctrl || key.meta || (key.shift && key.tab) || key.pageUp || key.pageDown) return;
     if (key.tab) {
-      if (suggestion) complete(suggestion.command);
+      if (suggestion) complete(suggestion.label);
       else if (!value) onModels();
       return;
     }
@@ -139,8 +149,10 @@ export function Composer({ width, accent, active, history, prefill, insertion, x
         setCursor(cursor + 1);
         return;
       }
-      if (suggestion && canonicalCommand(value.slice(1).toLowerCase()) !== suggestion.command) {
-        complete(suggestion.command);
+      if (suggestion && (mention
+        ? value.slice(mention.start, mention.end).toLowerCase() !== suggestion.label.toLowerCase()
+        : canonicalCommand(value.slice(1).toLowerCase()) !== suggestion.label.slice(1))) {
+        complete(suggestion.label);
         return;
       }
       if (value === '/') return;
@@ -192,10 +204,10 @@ export function Composer({ width, accent, active, history, prefill, insertion, x
 
   return (
     <>
-    {visibleRows.map((item, index) => <ActionRow key={item.command}
+    {visibleRows.map((item, index) => <ActionRow key={item.label}
       actions={[{
-        label: fit((' /' + item.command).padEnd(labelWidth) + item.summary, width).padEnd(width),
-        selected: item.command === suggestion?.command, run: () => complete(item.command),
+        label: fill(width < 32 ? ' ' + item.label : fill(' ' + item.label, labelWidth) + ' ' + item.summary, width),
+        selected: item.label === suggestion?.label, run: () => complete(item.label),
       }]}
       width={width} x={x} y={y + index} background={colors.surface} />)}
     <Box height={rowCount} width={width} flexDirection="column" flexShrink={0} overflow="hidden">

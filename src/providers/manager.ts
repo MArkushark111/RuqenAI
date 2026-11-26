@@ -5,9 +5,12 @@ import { AnthropicClient, anthropicHeaders } from './anthropic.js';
 import { ProviderCatalog } from './catalog.js';
 import { describeHttpError, describeStreamError } from './errors.js';
 import { GeminiClient, geminiHeaders } from './gemini.js';
+import { modelReferenceRows } from './modelReferences.js';
 import { OllamaClient } from './ollama.js';
 import { OpenAICompatClient, compatibleHeaders } from './openaiCompat.js';
+import { withRateLimit } from './rateLimit.js';
 import { normalizeEndpoint } from './protocols.js';
+import { sanitizeToolHistory } from './toolHistory.js';
 import type { ChatOptions } from './types.js';
 
 export interface ProviderModels {
@@ -31,6 +34,8 @@ interface Connection {
 
 type ModelRecord = Record<string, unknown> & {
   architecture?: { output_modalities?: string[]; input_modalities?: string[] };
+  input_modalities?: string[];
+  output_modalities?: string[];
   supported_parameters?: string[];
   supportedGenerationMethods?: string[];
   endpoints?: string[];
@@ -38,18 +43,19 @@ type ModelRecord = Record<string, unknown> & {
 
 function knownNonChat(id: string): boolean {
   return /(^|[\/_-])(embedding|embed|rerank|whisper|tts|moderation|dall-e|audio|realtime|transcribe|imagen|veo|chirp|sora)([\/_.:-]|$)/i.test(id)
-    || /^(?:gpt-image|codex-mini|computer-use|babbage|davinci|gpt-5.*-codex)/i.test(id)
+    || /^(?:gpt-image|computer-use|babbage|davinci)/i.test(id)
     || /(?:-image(?:-|$)|-tts(?:-|$))/i.test(id);
 }
 
 function modelFromRecord(raw: ModelRecord, provider: ProviderMetadata, defaultConnection: boolean): ModelMetadata | undefined {
   if (typeof raw !== 'object' || !raw) return undefined;
   const identifier = raw.id ?? raw.model ?? raw.name;
-  if (typeof identifier !== 'string' || !identifier || raw.is_deprecated === true) return undefined;
+  if (typeof identifier !== 'string' || !identifier) return undefined;
   const id = provider.id === 'gemini' ? identifier.replace(/^models\//, '') : identifier;
   const known = provider.popularModels.find((model) => model.id === id);
   let supported: boolean | undefined;
   if (knownNonChat(id)) supported = false;
+  else if (Array.isArray(raw.output_modalities)) supported = raw.output_modalities.includes('text');
   else if (raw.architecture?.output_modalities) supported = raw.architecture.output_modalities.includes('text');
   else if (raw.supportedGenerationMethods) supported = raw.supportedGenerationMethods.includes('generateContent');
   else if (raw.endpoints) supported = raw.endpoints.includes('chat');
@@ -65,7 +71,7 @@ function modelFromRecord(raw: ModelRecord, provider: ProviderMetadata, defaultCo
 
   const capabilities = [...(known?.capabilities ?? [])];
   if (supported && !capabilities.includes('text')) capabilities.push('text', 'code');
-  if (raw.architecture?.input_modalities?.includes('image') && !capabilities.includes('vision')) capabilities.push('vision');
+  if ((raw.architecture?.input_modalities ?? raw.input_modalities)?.includes('image') && !capabilities.includes('vision')) capabilities.push('vision');
   if (raw.supported_parameters?.includes('tools') && !capabilities.includes('function_calling')) capabilities.push('function_calling');
   const supportsThinking = raw.supported_parameters
     ? raw.supported_parameters.some((parameter) => parameter === 'reasoning' || parameter === 'reasoning_effort')
@@ -73,17 +79,22 @@ function modelFromRecord(raw: ModelRecord, provider: ProviderMetadata, defaultCo
       (provider.id === 'openai' && /^(o[134](?:-|$)|gpt-5)/.test(id))
       || (provider.id === 'anthropic' && /claude-(3-7-sonnet|(?:opus|sonnet|haiku)-4|fable|mythos)/.test(id))
       || (provider.id === 'gemini' && /^gemini-(2\.5|[34])/.test(id))
-      || (provider.id === 'deepseek' && /^deepseek-(reasoner|v4)/.test(id))
+      || (provider.id === 'deepseek' && /^deepseek-(reasoner|v4|flash|chat)/.test(id))
       || undefined
     );
   if (supportsThinking && !capabilities.includes('reasoning')) capabilities.push('reasoning');
   const context = raw.context_length ?? raw.context_window ?? raw.inputTokenLimit ?? raw.max_input_tokens;
   const name = raw.display_name ?? raw.displayName ?? (raw.id && raw.name) ?? known?.name;
+  const created = raw.created ?? raw.created_at ?? raw.createdAt;
+  const timestamp = typeof created === 'number' ? (created < 1e12 ? created * 1000 : created)
+    : typeof created === 'string' ? Date.parse(created) : NaN;
   return {
     id, name: typeof name === 'string' ? name : id, providerId: provider.id,
     capabilities, contextWindow: typeof context === 'number' ? context : (known?.contextWindow ?? 0),
     chatSupport: supported === undefined ? 'unknown' : supported ? 'supported' : 'unsupported',
     supportsThinking,
+    releasedAt: Number.isFinite(timestamp) ? timestamp : undefined,
+    deprecated: raw.is_deprecated === true || raw.deprecated === true || raw.status === 'deprecated',
   };
 }
 
@@ -95,6 +106,44 @@ function catalogModels(provider: ProviderMetadata): ModelMetadata[] {
       ? 'unknown'
       : 'unsupported',
   }));
+}
+
+function mergeKnownModels(provider: ProviderMetadata, models: ModelMetadata[], includeReferences = true): ModelMetadata[] {
+  const byId = new Map(models.map((model) => [model.id.toLowerCase(), model]));
+  for (const known of catalogModels(provider)) {
+    const key = known.id.toLowerCase();
+    const existing = byId.get(key);
+    if (!existing) {
+      byId.set(key, known);
+      continue;
+    }
+    byId.set(key, {
+      ...known,
+      ...existing,
+      name: existing.name && existing.name !== existing.id ? existing.name : known.name,
+      supportsThinking: existing.supportsThinking ?? known.supportsThinking,
+      capabilities: existing.capabilities.length ? existing.capabilities : known.capabilities,
+      contextWindow: existing.contextWindow || known.contextWindow,
+      chatSupport: existing.chatSupport === 'unsupported' && known.chatSupport !== 'unsupported'
+        ? known.chatSupport
+        : existing.chatSupport,
+      deprecated: existing.deprecated ?? known.deprecated,
+    });
+  }
+  if (includeReferences) {
+    for (const [id, label, status] of modelReferenceRows(provider.id, new Set(byId.keys()))) {
+      byId.set(id.toLowerCase(), {
+        id,
+        name: label,
+        providerId: provider.id,
+        capabilities: ['text', 'code'],
+        contextWindow: 0,
+        chatSupport: ProviderCatalog.connection(provider.id) === 'catalog' ? 'unsupported' : 'unknown',
+        deprecated: /retired|legacy|alias/i.test(status ?? ''),
+      });
+    }
+  }
+  return [...byId.values()];
 }
 
 function optionalKey(provider: ProviderMetadata): boolean {
@@ -137,11 +186,11 @@ function listLocation(connection: Connection): string | undefined {
   if (id === 'google-cloud-ai') return undefined;
   if (id === 'bedrock' && new URL(endpoint).hostname.startsWith('bedrock-runtime.')) return undefined;
   if (endpoint !== defaultBaseUrl) return endpoint + '/models';
-  if (id === 'cohere') return 'https://api.cohere.com/v1/models?endpoint=chat';
+  if (id === 'cohere') return 'https://api.cohere.com/v1/models';
+  if (id === 'gemini') return endpoint + '/models?pageSize=1000';
   if (id === 'fireworks') return 'https://api.fireworks.ai/v1/accounts/fireworks/models?pageSize=100';
   if (id === 'mistral') return 'https://api.mistral.ai/v1/models';
   if (id === 'siliconflow') return endpoint + '/models?type=text&sub_type=chat';
-  if (['perplexity', 'qwen', 'zhipu', 'bytedance-doubao', 'minimax', 'stepfun', 'baidu-ernie'].includes(id)) return undefined;
   return endpoint + '/models';
 }
 
@@ -153,43 +202,75 @@ function connectionHeaders(connection: Connection): Record<string, string> {
 }
 
 function providerInfo(provider: ProviderMetadata, status: ProviderModels['status'], detail: string): ProviderModels {
-  return { provider, status, models: catalogModels(provider), detail };
+  return { provider, status, models: mergeKnownModels(provider, []), detail };
 }
 
-async function fetchLiveModels(connection: Connection, location: string): Promise<ModelMetadata[]> {
+async function fetchLiveModels(connection: Connection, location: string): Promise<{ models: ModelMetadata[]; detail?: string }> {
   const { provider, endpoint, apiKey } = connection;
-  const signal = AbortSignal.timeout(4500);
+  const signal = AbortSignal.timeout(12_000);
   const models = new Map<string, ModelMetadata>();
   const pages = new Set<string>();
   let next: string | undefined = location;
-  while (next && !pages.has(next)) {
+  let detail: string | undefined;
+  const first = new URL(location);
+  while (next && !pages.has(next) && pages.size < 100) {
     pages.add(next);
-    const response = await fetch(next, {
-      headers: connectionHeaders(connection),
-      signal,
-      redirect: 'error',
-    });
-    if (!response.ok) throw new Error(await describeHttpError(provider.name, response, apiKey));
-    const data: { data?: ModelRecord[]; models?: ModelRecord[]; has_more?: boolean; last_id?: string; nextPageToken?: string; next_page_token?: string } = await response.json();
-    const records = Array.isArray(data) ? data : data.data ?? data.models;
-    if (!Array.isArray(records)) throw new Error('The endpoint did not return a model list.');
-    for (const record of records) {
-      const model = modelFromRecord(record, provider, endpoint === provider.defaultBaseUrl);
-      if (model) models.set(model.id, model);
+    try {
+      const response = await fetch(next, {
+        headers: connectionHeaders(connection),
+        signal,
+        redirect: 'error',
+      });
+      if (!response.ok) throw new Error(await describeHttpError(provider.name, response, apiKey));
+      const data: { data?: ModelRecord[]; models?: ModelRecord[]; has_more?: boolean; last_id?: string; nextPageToken?: string; next_page_token?: string; next?: string } = await response.json();
+      const records = Array.isArray(data) ? data : data.data ?? data.models;
+      if (!Array.isArray(records)) throw new Error('The endpoint did not return a model list.');
+      for (const record of records) {
+        const model = modelFromRecord(record, provider, endpoint === provider.defaultBaseUrl);
+        if (model) models.set(model.id, model);
+      }
+      const url = new URL(location);
+      if (typeof data.nextPageToken === 'string' && data.nextPageToken) url.searchParams.set('pageToken', data.nextPageToken);
+      else if (typeof data.next_page_token === 'string' && data.next_page_token) url.searchParams.set('page_token', data.next_page_token);
+      else if (data.has_more && typeof data.last_id === 'string' && data.last_id) url.searchParams.set('after_id', data.last_id);
+      else if (typeof data.next === 'string' && data.next) {
+        const link = new URL(data.next, url);
+        if (link.origin !== first.origin || link.pathname !== first.pathname || link.username || link.password || link.hash) {
+          throw new Error('The next model page points outside the configured model endpoint.');
+        }
+        url.search = link.search;
+      } else {
+        next = undefined;
+        if (data.has_more) detail = 'Partial model list. The provider did not specify a next page.';
+        break;
+      }
+      next = url.href;
+    } catch (error) {
+      if (!models.size) throw error;
+      detail = 'Partial model list. ' + describeStreamError(provider.name, error, apiKey);
+      next = undefined;
     }
-    const url = new URL(location);
-    if (['gemini', 'fireworks'].includes(provider.id) && data.nextPageToken) url.searchParams.set('pageToken', data.nextPageToken);
-    else if (provider.id === 'anthropic' && data.has_more && data.last_id) url.searchParams.set('after_id', data.last_id);
-    else if (provider.id === 'cohere' && data.next_page_token) url.searchParams.set('page_token', data.next_page_token);
-    next = url.href;
   }
-  return [...models.values()].sort((left, right) => left.id.localeCompare(right.id));
+  if (next) detail ??= 'Partial model list. Pagination did not finish.';
+  return { models: [...models.values()].sort((left, right) => left.id.localeCompare(right.id)), detail };
 }
 
 export class ProviderManager {
+  public static hasChatConnection(provider: ProviderMetadata): boolean {
+    if (configManager.get().disconnectedProviders.includes(provider.id)
+      || ProviderCatalog.connection(provider.id) === 'catalog') return false;
+    try {
+      const connection = resolveConnection(provider, {});
+      return Boolean(connection.apiKey || optionalKey(provider));
+    } catch {
+      return false;
+    }
+  }
+
   public static async *streamChat(
     providerId: string, model: string, messages: ChatMessage[], options: ChatOptions = {},
   ): AsyncGenerator<StreamChunk> {
+    messages = sanitizeToolHistory(messages);
     const provider = ProviderCatalog.get(providerId);
     if (!provider) {
       yield { error: 'Select a known provider or configure the Custom endpoint.' };
@@ -217,18 +298,18 @@ export class ProviderManager {
       return;
     }
     if (provider.id === 'ollama') {
-      yield* new OllamaClient(endpoint).streamChat(messages, model, options);
+      yield* withRateLimit(provider.id, options.signal, new OllamaClient(endpoint).streamChat(messages, model, options));
       return;
     }
     if (provider.id === 'anthropic') {
-      yield* AnthropicClient.streamChat(apiKey, messages, model, options, endpoint);
+      yield* withRateLimit(provider.id, options.signal, AnthropicClient.streamChat(apiKey, messages, model, options, endpoint));
       return;
     }
     if (provider.id === 'gemini') {
-      yield* GeminiClient.streamChat(apiKey, messages, model, options, endpoint);
+      yield* withRateLimit(provider.id, options.signal, GeminiClient.streamChat(apiKey, messages, model, options, endpoint));
       return;
     }
-    yield* OpenAICompatClient.streamChat(provider, apiKey, endpoint, messages, model, options);
+    yield* withRateLimit(provider.id, options.signal, OpenAICompatClient.streamChat(provider, apiKey, endpoint, messages, model, options));
   }
 
   public static async discoverModels(providerId: string, candidate: ProviderCandidate = {}): Promise<ProviderModels> {
@@ -261,7 +342,11 @@ export class ProviderManager {
       return providerInfo(provider, 'catalog', 'This chat route has no verified model-list endpoint. Enter your exact model or deployment ID to use it.');
     }
     try {
-      return { provider, status: 'live', models: await fetchLiveModels(connection, location) };
+      const { models, detail } = await fetchLiveModels(connection, location);
+      if (provider.id === 'zai' && models.length === 0) {
+        return providerInfo(provider, 'catalog', 'Z.ai returned an empty model list. Catalog entries require access on your account.');
+      }
+      return { provider, status: 'live', models: mergeKnownModels(provider, models), detail };
     } catch (error) {
       return providerInfo(provider, 'catalog', describeStreamError(provider.name, error, apiKey));
     }
@@ -270,6 +355,7 @@ export class ProviderManager {
   public static async checkProvider(providerId: string, candidate: ProviderCandidate = {}): Promise<ProviderModels> {
     const result = await this.discoverModels(providerId, candidate);
     if (!result.provider || result.status !== 'live' || result.provider.id === 'ollama') return result;
+    if (result.detail) return result;
     const { provider, endpoint, apiKey } = resolveConnection(result.provider, candidate);
     if (!apiKey) return { ...result, detail: 'The endpoint returned a live model list without a key.' };
 

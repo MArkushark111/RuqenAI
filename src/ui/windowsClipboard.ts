@@ -1,4 +1,5 @@
 import { execFile } from 'node:child_process';
+import { stat } from 'node:fs/promises';
 import { promisify } from 'node:util';
 import { homedir } from 'node:os';
 import { join, win32 } from 'node:path';
@@ -18,6 +19,30 @@ export function clipboardPaths(text: string): string[] {
     }
     return win32.isAbsolute(entry) ? [entry] : [];
   });
+}
+
+// Terminals deliver dragged-in files as text: quoted paths, file:// URIs, or bare C:\ paths.
+// Returns the prompt with attachment tokens removed plus the files that actually exist.
+export async function extractDroppedFiles(text: string): Promise<{ text: string; files: string[] }> {
+  const candidates = new Map<string, string>();
+  const add = (raw: string, candidate: string) => {
+    const path = candidate.trim().replace(/^["']+|["']+$/g, '');
+    if (win32.isAbsolute(path) && !candidates.has(path)) candidates.set(path, raw);
+  };
+  for (const match of text.matchAll(/"([^"\n]+)"|'([^'\n]+)'/g)) add(match[0], match[1] ?? match[2] ?? '');
+  for (const match of text.matchAll(/file:\/\/[^\s"')\]]+/gi)) {
+    try { add(match[0], fileURLToPath(match[0], { windows: true })); } catch { /* not a file URI */ }
+  }
+  for (const match of text.matchAll(/\b[A-Za-z]:[\\/][^\s"'`<>|]+/g)) {
+    const trimmed = match[0].replace(/[.,;:!?)\]}"']+$/, '');
+    add(trimmed, trimmed);
+  }
+  const checked = await Promise.all([...candidates].map(async ([path, raw]) =>
+    (await stat(path).catch(() => undefined))?.isFile() ? { path, raw } : undefined));
+  const files = checked.filter((entry): entry is { path: string; raw: string } => entry !== undefined);
+  let cleaned = text;
+  for (const { raw } of files) cleaned = cleaned.split(raw).join(' ');
+  return { text: cleaned.replace(/[ \t]{2,}/g, ' ').trim(), files: files.map(({ path }) => path) };
 }
 
 const script = `

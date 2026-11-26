@@ -202,8 +202,12 @@ export const PROVIDERS_CATALOG: Record<string, ProviderMetadata> = {
     defaultBaseUrl: 'https://api.deepseek.com',
     website: 'https://deepseek.com',
     popularModels: [
-      { id: 'deepseek-flash', name: 'DeepSeek Flash', providerId: 'deepseek', capabilities: ['text', 'code', 'reasoning', 'vision'], contextWindow: 1_000_000, supportsThinking: true, isDefault: true },
-      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', providerId: 'deepseek', capabilities: ['text', 'code', 'reasoning'], contextWindow: 1_000_000, supportsThinking: true },
+      { id: 'deepseek-flash', name: 'DeepSeek V4.1 Flash', providerId: 'deepseek', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true, isDefault: true },
+      { id: 'deepseek-v4-pro', name: 'DeepSeek V4 Pro', providerId: 'deepseek', capabilities: ['text', 'code', 'reasoning', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true },
+      { id: 'deepseek-v4-flash', name: 'DeepSeek V4 Flash', providerId: 'deepseek', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true, deprecated: true },
+      { id: 'deepseek-v4-flash-vision-exp', name: 'DeepSeek V4 Flash Vision Exp', providerId: 'deepseek', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true, deprecated: true },
+      { id: 'deepseek-chat', name: 'DeepSeek Chat (retired ID)', providerId: 'deepseek', capabilities: ['text', 'code', 'function_calling'], contextWindow: 128000, deprecated: true },
+      { id: 'deepseek-reasoner', name: 'DeepSeek Reasoner (retired ID)', providerId: 'deepseek', capabilities: ['text', 'code', 'reasoning'], contextWindow: 128000, supportsThinking: true, deprecated: true },
     ],
   },
 
@@ -284,6 +288,12 @@ export const PROVIDERS_CATALOG: Record<string, ProviderMetadata> = {
     popularModels: [
       { id: 'nvidia/nemotron-3-super-120b-a12b', name: 'Nemotron 3 Super', providerId: 'nvidia', capabilities: ['text', 'code', 'reasoning', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true, isDefault: true },
       { id: 'nvidia/llama-3.3-nemotron-super-49b-v1.5', name: 'Llama Nemotron Super 49B', providerId: 'nvidia', capabilities: ['text', 'code', 'reasoning', 'function_calling'], contextWindow: 131072, supportsThinking: true },
+      { id: 'meta/llama-3.3-70b-instruct', name: 'Llama 3.3 70B', providerId: 'nvidia', capabilities: ['text', 'code', 'function_calling'], contextWindow: 131072 },
+      { id: 'deepseek-ai/deepseek-r1', name: 'DeepSeek R1', providerId: 'nvidia', capabilities: ['text', 'code', 'reasoning'], contextWindow: 131072, supportsThinking: true },
+      { id: 'qwen/qwen3-coder-480b-a35b-instruct', name: 'Qwen3 Coder 480B', providerId: 'nvidia', capabilities: ['text', 'code', 'function_calling'], contextWindow: 262144 },
+      { id: 'moonshotai/kimi-k2-instruct', name: 'Kimi K2', providerId: 'nvidia', capabilities: ['text', 'code', 'function_calling'], contextWindow: 262144 },
+      { id: 'openai/gpt-oss-120b', name: 'GPT OSS 120B', providerId: 'nvidia', capabilities: ['text', 'code', 'reasoning', 'function_calling'], contextWindow: 131072, supportsThinking: true },
+      { id: 'mistralai/mistral-large-2-instruct', name: 'Mistral Large 2', providerId: 'nvidia', capabilities: ['text', 'code', 'function_calling'], contextWindow: 131072 },
     ],
   },
   groq: {
@@ -583,14 +593,30 @@ export const PROVIDERS_CATALOG: Record<string, ProviderMetadata> = {
 
   zhipu: {
     id: 'zhipu',
-    name: 'Zhipu AI (GLM)',
+    name: 'Zhipu AI (BigModel)',
     category: 'Chinese Frontier LLM',
-    description: 'Tsinghua Knowledge Engineering Group spinoff with GLM-4-Plus.',
+    description: 'Zhipu AI’s China-region BigModel API.',
     envKey: 'ZHIPU_API_KEY',
     defaultBaseUrl: 'https://open.bigmodel.cn/api/paas/v4',
     website: 'https://zhipuai.cn',
     popularModels: [
-      { id: 'glm-4-plus', name: 'GLM-4 Plus', providerId: 'zhipu', capabilities: ['text', 'code', 'reasoning'], contextWindow: 128000, isDefault: true },
+      { id: 'glm-5.3', name: 'GLM-5.3', providerId: 'zhipu', capabilities: ['text', 'code', 'reasoning'], contextWindow: 128000, isDefault: true },
+      { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', providerId: 'zhipu', capabilities: ['text', 'code', 'reasoning'], contextWindow: 128000 },
+      { id: 'glm-4-plus', name: 'GLM-4 Plus', providerId: 'zhipu', capabilities: ['text', 'code', 'reasoning'], contextWindow: 128000 },
+    ],
+  },
+
+  zai: {
+    id: 'zai',
+    name: 'Z.ai (GLM)',
+    category: 'Chinese Frontier LLM',
+    description: 'International Z.ai API for GLM chat and coding models.',
+    envKey: 'ZAI_API_KEY',
+    defaultBaseUrl: 'https://api.z.ai/api/paas/v4',
+    website: 'https://z.ai',
+    popularModels: [
+      { id: 'glm-5.3', name: 'GLM-5.3', providerId: 'zai', capabilities: ['text', 'code', 'reasoning'], contextWindow: 128000, isDefault: true },
+      { id: 'glm-5.3-flash', name: 'GLM-5.3-Flash', providerId: 'zai', capabilities: ['text', 'code', 'reasoning', 'vision'], contextWindow: 1_000_000 },
     ],
   },
 
@@ -603,7 +629,14 @@ export const PROVIDERS_CATALOG: Record<string, ProviderMetadata> = {
     defaultBaseUrl: 'https://api.moonshot.ai/v1',
     website: 'https://moonshot.cn',
     popularModels: [
-      { id: 'moonshot-v1-128k', name: 'Moonshot v1 128k', providerId: 'moonshot', capabilities: ['text', 'code'], contextWindow: 128000, isDefault: true },
+      { id: 'kimi-k3.1-pro', name: 'Kimi K3.1 Pro', providerId: 'moonshot', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true, isDefault: true },
+      { id: 'kimi-k3.1-pro-highspeed', name: 'Kimi K3.1 Pro Highspeed', providerId: 'moonshot', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true },
+      { id: 'kimi-k3', name: 'Kimi K3', providerId: 'moonshot', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 1_000_000, supportsThinking: true },
+      { id: 'kimi-k2.7-code', name: 'Kimi K2.7 Code', providerId: 'moonshot', capabilities: ['text', 'code', 'function_calling'], contextWindow: 262_144 },
+      { id: 'kimi-k2.6', name: 'Kimi K2.6', providerId: 'moonshot', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 262_144, supportsThinking: true },
+      { id: 'kimi-k2.5', name: 'Kimi K2.5', providerId: 'moonshot', capabilities: ['text', 'code', 'reasoning', 'vision', 'function_calling'], contextWindow: 262_144, supportsThinking: true },
+      { id: 'kimi-k2-thinking', name: 'Kimi K2 Thinking', providerId: 'moonshot', capabilities: ['text', 'code', 'reasoning', 'function_calling'], contextWindow: 262_144, supportsThinking: true },
+      { id: 'moonshot-v1-128k', name: 'Moonshot v1 128k', providerId: 'moonshot', capabilities: ['text', 'code'], contextWindow: 128000, deprecated: true },
     ],
   },
 

@@ -4,7 +4,7 @@ export type ProviderConnection = 'native' | 'compatible' | 'endpoint' | 'catalog
 const compatible = new Set([
   'openai', 'cohere', 'mistral', 'xai', 'perplexity', 'deepseek',
   'groq', 'together', 'fireworks', 'deepinfra', 'siliconflow',
-  'openrouter', 'litellm', 'huggingface', 'zhipu', 'moonshot', 'qwen',
+  'openrouter', 'litellm', 'huggingface', 'zhipu', 'zai', 'moonshot', 'qwen',
   'bytedance-doubao', 'minimax', 'stepfun', 'baidu-ernie', 'ai21', 'nvidia',
 ]);
 const native = new Set(['ollama', 'anthropic', 'gemini']);

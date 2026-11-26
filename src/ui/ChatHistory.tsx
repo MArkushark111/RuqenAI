@@ -2,38 +2,66 @@ import React from 'react';
 import { Box, Text } from 'ink';
 import { ChatMessage, TaskItem, TranscriptSegment } from '../types/index.js';
 import stringWidth from 'string-width';
-import wrapAnsi from 'wrap-ansi';
 import { useMouse } from './MouseListener.js';
 import { highlightCode } from './syntax.js';
-import { cleanText, colors, fill, fit, wrapLines } from './terminal.js';
+import { cleanText, colors, fill, fit, formatDuration, wrapLines } from './terminal.js';
 
 interface TranscriptLine {
   text: string;
   tone?: 'prompt' | 'command' | 'reasoning' | 'muted' | 'code' | 'emphasis' | 'error' | 'tool';
   mark?: string;
   changes?: TaskItem['changes'];
+  diffLine?: 'added' | 'removed';
   reasoningId?: string;
   promptId?: string;
+  filePath?: string;
+  spans?: StyledSpan[];
 }
 
 type MessageView = Partial<ChatMessage> & Pick<ChatMessage, 'role' | 'content'>;
 
-function colorHighlights(text: string): string {
-  const applyColor = process.env.TERM !== 'dumb' && !Object.hasOwn(process.env, 'NO_COLOR');
-  const paint = (body: string, hex: string, bold = false) => {
-    if (!applyColor) return body;
-    const rgb = [0, 2, 4].map((index) => Number.parseInt(hex.slice(index, index + 2), 16)).join(';');
-    return `\x1b[${bold ? '1;' : ''}38;2;${rgb}m${body}\x1b[39m${bold ? '\x1b[22m' : ''}`;
-  };
-  return text.replace(/`[^`]*`|\[highlight\]([^\n]+?)\[\/highlight\]|\[color=#([\da-f]{6})\]([^\n]+?)\[\/color\]/gi,
-    (match, highlight, hex, body) => highlight !== undefined ? paint(highlight, colors.coffee.slice(1), true)
-      : hex !== undefined ? paint(body, hex) : match);
+interface StyledSpan {
+  text: string;
+  color?: string;
+  bold?: boolean;
+}
+
+function wrapHighlights(source: string, width: number): TranscriptLine[] {
+  const spans: StyledSpan[] = [];
+  let end = 0;
+  for (const match of source.matchAll(/`[^`]*`|\[highlight\]([^\n]+?)\[\/highlight\]|\[color=#([\da-f]{6})\]([^\n]+?)\[\/color\]/gi)) {
+    spans.push({ text: source.slice(end, match.index) });
+    const [raw, highlight, hex, body] = match;
+    spans.push(highlight !== undefined ? { text: highlight, color: colors.coffee, bold: true }
+      : hex !== undefined ? { text: body, color: '#' + hex } : { text: raw });
+    end = match.index + raw.length;
+  }
+  spans.push({ text: source.slice(end) });
+  const visible = spans.map((span) => span.text).join('');
+  let index = 0;
+  let used = 0;
+  return wrapLines(visible, width, true).map((text) => {
+    const parts: StyledSpan[] = [];
+    let remaining = text.length;
+    while (remaining > 0 && index < spans.length) {
+      const span = spans[index];
+      const length = Math.min(remaining, span.text.length - used);
+      if (length) parts.push({ ...span, text: span.text.slice(used, used + length) });
+      remaining -= length;
+      used += length;
+      if (used === span.text.length) {
+        index++;
+        used = 0;
+      }
+    }
+    return { text, spans: parts };
+  });
 }
 
 function proseLines(source: string, width: number, reasoning = false, markdown = true): TranscriptLine[] {
   const lines: TranscriptLine[] = [];
   const mark = reasoning ? '|' : undefined;
-  const room = width - 2;
+  const room = Math.max(1, width - 3);
   let fence: { marker: string; language: string; code: string[] } | undefined;
   function flushCode() {
     if (!fence || !fence.code.length) return;
@@ -62,25 +90,26 @@ function proseLines(source: string, width: number, reasoning = false, markdown =
       continue;
     }
     const heading = !reasoning && markdown ? line.match(/^\s{0,3}#{1,6}\s+(.*)$/) : null;
-    const textLine = heading?.[1] ?? line;
+    const textLine = (heading?.[1] ?? line).normalize();
     const wrapped = markdown && !reasoning && /\[(?:highlight\]|color=)/i.test(textLine)
-      ? wrapAnsi(colorHighlights(textLine), Math.max(1, room), { hard: true, trim: false }).split('\n')
-      : wrapLines(textLine, room);
-    for (const text of wrapped) {
-      lines.push({ text, tone: reasoning ? 'reasoning' : heading ? 'emphasis' : undefined, mark });
+      ? wrapHighlights(textLine, room)
+      : wrapLines(textLine, room).map((text) => ({ text }));
+    for (const row of wrapped) {
+      lines.push({ ...row, tone: reasoning ? 'reasoning' : heading ? 'emphasis' : undefined, mark });
     }
   }
   flushCode();
   return lines;
 }
 
-const segmentCache = new WeakMap<TranscriptSegment, { width: number; lines: TranscriptLine[] }>();
+const segmentCache = new WeakMap<TranscriptSegment, { width: number; accent: string; lines: TranscriptLine[] }>();
 
 function segmentLines(segment: Extract<TranscriptSegment, { text: string }>, width: number) {
+  const accent = colors.coffee;
   const cached = segmentCache.get(segment);
-  if (cached?.width === width) return cached.lines;
+  if (cached?.width === width && cached.accent === accent) return cached.lines;
   const lines = proseLines(segment.text, width, segment.kind === 'reasoning');
-  segmentCache.set(segment, { width, lines });
+  segmentCache.set(segment, { width, accent, lines });
   return lines;
 }
 
@@ -105,9 +134,45 @@ export function formatMessage(message: MessageView, width: number, isExpanded: (
     const failed = task.status === 'failed' || (task.exitCode !== undefined && task.exitCode !== 0);
     const detail = task.exitCode !== undefined ? ` · exit ${task.exitCode}`
       : task.status === 'completed' ? '' : ` · ${task.status === 'in_progress' ? 'running' : task.status}`;
+    const fileChange = task.status === 'completed' && (task.tool === 'write_file' || task.tool === 'edit_file');
+    const expandable = fileChange || (task.tool === 'run_shell' && task.status !== 'in_progress');
+    const id = expandable ? 'output:' + task.id : task.tool === 'delegate' ? 'subagent:' + task.id : undefined;
+    const expanded = expandable && id !== undefined && isExpanded(id);
+    const title = id ? `${expanded ? '▾' : '▸'} ${text}` : text;
     const changeWidth = task.changes ? stringWidth(`  +${task.changes.added} −${task.changes.removed}`) : 0;
-    lines.push({ text: fit(text, Math.max(1, width - 2 - changeWidth - stringWidth(detail))) + detail,
-      tone: failed ? 'error' : 'tool', changes: task.changes });
+    lines.push({ text: fit(title, Math.max(1, width - 2 - changeWidth - stringWidth(detail))) + detail,
+      tone: failed ? 'error' : 'tool', changes: task.changes, reasoningId: id });
+    if (expanded) {
+      const addLog = (body: string, tone: TranscriptLine['tone'] = 'code') => {
+        for (const line of wrapLines(body, width - 4, true)) lines.push({ text: '  ' + line, tone });
+      };
+      if (fileChange) {
+        if (!task.diff) {
+          addLog(task.diff === '' ? 'No changes.' : 'No diff was recorded.', 'muted');
+        } else {
+          for (const line of task.diff.split('\n')) {
+            const diffLine = line.startsWith('+') ? 'added' : line.startsWith('-') ? 'removed' : undefined;
+            for (const text of wrapLines(line, width - 4, true)) {
+              lines.push({ text: '  ' + text, tone: line.startsWith('@@') ? 'muted' : 'code', diffLine });
+            }
+          }
+        }
+      } else if (task.shellLog) {
+        const { command, cwd, stdout, stderr } = task.shellLog;
+        addLog('Command', 'command');
+        addLog(command);
+        addLog(`Working directory: ${cwd}`, 'muted');
+        const exit = task.exitCode === undefined ? task.status : `exit ${task.exitCode}`;
+        const elapsed = task.durationMs === undefined ? '' : ` · ${task.durationMs} ms`;
+        addLog(exit + elapsed, failed ? 'error' : 'muted');
+        addLog('stdout', 'command');
+        addLog(stdout.replace(/\r?\n$/, '') || '(empty)');
+        addLog('stderr', 'command');
+        addLog(stderr.replace(/\r?\n$/, '') || '(empty)', stderr ? 'error' : 'muted');
+      } else {
+        addLog(task.output?.trimEnd() || 'No output was recorded.', failed ? 'error' : 'code');
+      }
+    }
   };
   const addThought = (id: string, label: string, body: () => TranscriptLine[]) => {
     const expanded = isExpanded(id);
@@ -123,11 +188,15 @@ export function formatMessage(message: MessageView, width: number, isExpanded: (
       if (previous && previous !== segment.kind) lines.push({ text: '' });
       if (segment.kind === 'reasoning') {
         const elapsed = segment.durationMs;
-        const label = elapsed === undefined ? 'Thinking'
-          : `Thought · ${elapsed < 1000 ? elapsed + 'ms' : (elapsed / 1000).toFixed(1) + 's'}`;
+        const label = elapsed === undefined ? 'Thinking' : `Thought · ${formatDuration(elapsed)}`;
         addThought(segment.id, label, () => segmentLines(segment, width));
       } else if (segment.kind === 'text') {
         lines.push(...segmentLines(segment, width));
+      } else if (segment.kind === 'question') {
+        for (const text of wrapLines('Question · ' + segment.question + '\n' +
+          (segment.answer === undefined ? 'Skipped' : 'Answer · ' + segment.answer), width - 3)) {
+          lines.push({ text, tone: 'muted' });
+        }
       } else {
         const task = byId.get(segment.taskId);
         if (task) addTool(task);
@@ -148,12 +217,16 @@ export function formatMessage(message: MessageView, width: number, isExpanded: (
     lines.push({ text: '' }, ...wrapLines(message.note, width - 2).map((text): TranscriptLine => ({ text, tone: 'muted' })));
   }
 
+  for (const file of message.attachments ?? []) {
+    lines.push({ text: fit(`Attached: ${file.name}  ${file.path}`, width - 2), tone: 'muted', filePath: file.path });
+  }
+
   if (message.error) {
     for (const text of wrapLines(`Error: ${message.error}`, width - 2)) lines.push({ text, tone: 'error' });
   }
 
   if (message.role === 'assistant' && message.durationMs && (message.content || message.reasoningContent)) {
-    const elapsed = `${(message.durationMs / 1000).toFixed(1)}s`;
+    const elapsed = formatDuration(message.durationMs);
     const tokens = message.usage?.outputTokens;
     const measured = tokens === undefined ? '' : `${tokens.toLocaleString()} output tokens`;
     const details = [elapsed, measured].filter(Boolean).join('  ·  ');
@@ -178,7 +251,7 @@ interface ChatHistoryProps {
   accent: string;
   x: number;
   y: number;
-  onReasoning?: (id: string) => void;
+  onReasoning?: (id: string, screenRow: number) => void;
   onPrompt?: (id: string) => void;
 }
 
@@ -195,30 +268,39 @@ export function ChatHistory({ lines, width, height, scrollOffset, accent, x, y, 
     const id = onReasoning && line?.reasoningId && column >= 2 && column < 2 + stringWidth(line.text)
       ? line.reasoningId : undefined;
     const promptId = onPrompt && line?.promptId && column >= 0 && column < width ? line.promptId : undefined;
-    if (event.type === 'move') setHovered(id ?? promptId);
-    if (id && event.type === 'click' && event.button === 0) onReasoning?.(id);
+    const fileId = onReasoning && line?.filePath && column >= 0 && column < width ? 'file:' + line.filePath : undefined;
+    if (event.type === 'move') setHovered(id ?? promptId ?? fileId);
+    if (id && event.type === 'click' && event.button === 0) onReasoning?.(id, event.y - y - 1);
     if (promptId && event.type === 'click' && event.button === 0) onPrompt?.(promptId);
+    if (fileId && event.type === 'click' && event.button === 0) onReasoning?.(fileId, event.y - y - 1);
   });
   const tones = { command: colors.muted, reasoning: colors.muted, muted: colors.muted, code: colors.code, error: colors.error, tool: colors.coffee };
 
   return (
-    <Box width={width} height={height} flexDirection="column" flexShrink={0} overflow="hidden">
+    <Box width={width} height={height} flexDirection="column" flexShrink={0} overflowY="hidden">
       {reserveHint && (
         <Text color={colors.muted}>
           {fit(offset > 0 ? `↓  ${offset} newer ${offset === 1 ? 'line' : 'lines'}` : '↑  PageUp for earlier lines', width)}
         </Text>
       )}
-      {lines.slice(start, end).map(({ text, tone, mark, changes, reasoningId, promptId }, index) => tone === 'prompt' ? (
+      {lines.slice(start, end).map(({ text, tone, mark, changes, reasoningId, promptId, filePath, diffLine, spans }, index) => {
+        const link = reasoningId ?? (filePath ? 'file:' + filePath : undefined);
+        return tone === 'prompt' ? (
         <Text key={start + index} backgroundColor={onPrompt && promptId === hovered ? colors.board : colors.surface} color={colors.ink}>
           <Text color={accent} bold>{` ${mark ?? ' '} `}</Text>{fill(text, width - 3)}
         </Text>
       ) : (
         <Text key={start + index} color={tone && tone !== 'emphasis' ? tones[tone] : colors.ink} bold={tone === 'emphasis' || tone === 'command'}>
-          {mark ? `${mark} ` : '  '}{reasoningId ? <Text backgroundColor={reasoningId === hovered ? colors.rule : undefined}>{text}</Text>
-            : tone === 'code' || tone === 'tool' || tone === 'error' ? text : inlineFormat(text || ' ')}
+          {mark ? `${mark} ` : '  '}{diffLine ? (
+            <Text color={diffLine === 'added' ? '#B6E6BD' : '#FFB9B3'}
+              backgroundColor={diffLine === 'added' ? '#243B2B' : '#492B2B'}>{fill(text, width - 2)}</Text>
+          ) : link ? <Text backgroundColor={link === hovered ? colors.rule : undefined}>{text}</Text>
+            : spans?.length ? spans.map((span, part) => <Text key={part} color={span.color} bold={span.bold}>
+              {inlineFormat(span.text)}
+            </Text>) : tone === 'code' || tone === 'tool' || tone === 'error' ? text : inlineFormat(text || ' ')}
           {changes && <><Text color={colors.done}>{`  +${changes.added}`}</Text><Text color={colors.error}>{` −${changes.removed}`}</Text></>}
         </Text>
-      ))}
+      );})}
     </Box>
   );
 }

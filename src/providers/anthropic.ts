@@ -13,12 +13,19 @@ function anthropicHistory(messages: ChatMessage[]) {
   return messages.flatMap((message) => {
     if (message.role === 'system') return [];
     if (message.role === 'tool') {
+      const content: unknown = message.images?.length
+        ? [
+            { type: 'text', text: message.content },
+            ...message.images.map(({ mediaType, data }) =>
+              ({ type: 'image', source: { type: 'base64', media_type: mediaType, data } })),
+          ]
+        : message.content;
       return [{
         role: 'user',
         content: [{
           type: 'tool_result',
           tool_use_id: message.toolCallId,
-          content: message.content,
+          content,
           is_error: Boolean(message.error),
         }] as ContentBlock[],
       }];
@@ -166,6 +173,7 @@ export class AnthropicClient {
             : undefined;
           yield {
             isDone: true,
+            finishReason: stopReason,
             usage: readUsage(inputTokens, metrics.output_tokens),
             toolCalls: toolCalls.length ? toolCalls : undefined,
           };

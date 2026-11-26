@@ -6,13 +6,16 @@ import { commandGroups, type CommandView } from '../commands/catalog.js';
 import { configManager } from '../config/settings.js';
 import { ProviderCatalog } from '../providers/catalog.js';
 import { ProviderManager } from '../providers/manager.js';
-import { SessionManager, sessionManager } from '../agent/context.js';
+import { modelReferenceRows } from '../providers/modelReferences.js';
+import { inWorkspace, SessionManager, sessionManager, workspaceKey } from '../agent/context.js';
 import type { AgentMode } from '../agent/engine.js';
 import { normalizeEndpoint } from '../providers/protocols.js';
 import { defaultModelRates, modelRateKey } from '../providers/usage.js';
 import type { ProviderMetadata } from '../types/index.js';
+import { copyToClipboard } from '../commands/router.js';
+import { lanHostAddress, lanHostPort, mobilePairingCode, startLanHost, stopLanHost } from '../lan/host.js';
 import { MouseListener } from './MouseListener.js';
-import { colors, fit, graphemes, singleLine } from './terminal.js';
+import { applyTheme, colors, fit, graphemes, mixHex, singleLine, themeNames } from './terminal.js';
 
 export interface CommandOverlayProps {
   agentMode: AgentMode;
@@ -33,6 +36,7 @@ export interface CommandOverlayProps {
   onRewindPrompt: () => void;
   onDropAttachment: (file: string) => void;
   onEditSession: (id: string, changes: { name?: string; hidden?: boolean }) => boolean;
+  onDeleteSession?: (id: string) => boolean;
 }
 
 interface Row {
@@ -51,8 +55,10 @@ interface Group {
 
 type Layout = Pick<CommandOverlayProps, 'width' | 'height' | 'top' | 'left' | 'accent' | 'onClose'>;
 
-const selectedSurface = '#47362A';
-const panelMuted = '#ADA198';
+// Tinted surfaces and muted text derive from the active accent, so every theme (and eco) recolors them.
+const selectedSurface = () => mixHex(colors.board, colors.coffee, 0.24);
+const hoverSurface = () => mixHex(colors.board, colors.coffee, 0.38);
+const panelMuted = () => mixHex(colors.muted, colors.ink, 0.15);
 
 function pad(text: string, width: number): string {
   const clipped = fit(text, width);
@@ -72,17 +78,18 @@ function PanelHeader({ title, width, accent }: Pick<Layout, 'width' | 'accent'> 
   return (
     <Box height={1} flexShrink={0} justifyContent="space-between">
       <Text bold color={accent} backgroundColor={colors.board}>{fit(title, Math.max(0, width - close.length - 2))}</Text>
-      {width >= 8 && <Text color={panelMuted} backgroundColor={colors.board}>{close}</Text>}
+      {width >= 8 && <Text color={panelMuted()} backgroundColor={colors.board}>{close}</Text>}
     </Box>
   );
 }
 
-function Picker({ title, groups, search = true, message, initialId, ...layout }: Layout & {
+function Picker({ title, groups, search = true, message, initialId, browseReferences = false, ...layout }: Layout & {
   title: string;
   groups: Group[];
   search?: boolean;
   message?: string;
   initialId?: string;
+  browseReferences?: boolean;
 }) {
   const { width, height, top, left, accent, onClose } = layout;
   const [query, setQuery] = useState('');
@@ -97,7 +104,7 @@ function Picker({ title, groups, search = true, message, initialId, ...layout }:
     if (!filtered.length) return [];
     return [...(groupTitle ? [{ heading: groupTitle }] : []), ...filtered.map((row) => ({ row }))];
   }) as Array<{ heading: string } | { row: Row }>;
-  const choices = entries.flatMap((entry) => 'row' in entry && entry.row.activate ? [entry.row] : []);
+  const choices = entries.flatMap((entry) => 'row' in entry && (entry.row.activate || browseReferences) ? [entry.row] : []);
   const selection = Math.max(0, choices.findIndex((row) => row.id === selectedId));
   const selected = choices[selection];
   const selectedLine = selected ? entries.findIndex((entry) => 'row' in entry && entry.row.id === selected.id) : 0;
@@ -159,29 +166,29 @@ function Picker({ title, groups, search = true, message, initialId, ...layout }:
   return (
     <Box flexDirection="column" width={width} height={height} overflow="hidden">
       <PanelHeader title={title} width={width} accent={accent} />
-      {showSubheading && <Text color={panelMuted} backgroundColor={colors.board}>
+      {showSubheading && <Text color={panelMuted()} backgroundColor={colors.board}>
         {search ? <><Text color={accent}>{'Find  '}</Text>{fit(query || message || '', width - 6)}</> : fit(message || '', width)}
       </Text>}
       <Box flexDirection="column" height={room} flexShrink={0}>
-        {visible.length === 0 && <Text color={panelMuted} backgroundColor={colors.board}>{fit(query ? 'No matching entries' : message || 'No entries', width)}</Text>}
+        {visible.length === 0 && <Text color={panelMuted()} backgroundColor={colors.board}>{fit(query ? 'No matching entries' : message || 'No entries', width)}</Text>}
         {visible.map((entry) => {
-          if ('heading' in entry) return <Text key={entry.heading} color={panelMuted} backgroundColor={colors.board} bold>{fit(entry.heading, width)}</Text>;
+          if ('heading' in entry) return <Text key={entry.heading} color={panelMuted()} backgroundColor={colors.board} bold>{fit(entry.heading, width)}</Text>;
           const { row } = entry;
           const active = row.id === selected?.id;
           const detailWidth = width >= 40 && row.detail ? Math.min(41, Math.floor(width / 2)) : 0;
           const nameWidth = Math.max(0, width - 2 - detailWidth);
           return (
-            <Text key={row.id} backgroundColor={row.id === hoveredId ? '#564335' : active ? selectedSurface : colors.board}>
-              <Text bold={active} color={active ? accent : row.activate ? colors.ink : panelMuted}>{fit(active ? '› ' : '  ', width) + pad(row.label, nameWidth)}</Text>
-              {detailWidth > 0 && <Text color={panelMuted}>{pad('  ' + row.detail, detailWidth)}</Text>}
+            <Text key={row.id} backgroundColor={row.id === hoveredId ? hoverSurface() : active ? selectedSurface() : colors.board}>
+              <Text bold={active} color={active ? accent : row.activate ? colors.ink : panelMuted()}>{fit(active ? '› ' : '  ', width) + pad(row.label, nameWidth)}</Text>
+              {detailWidth > 0 && <Text color={panelMuted()}>{pad('  ' + row.detail, detailWidth)}</Text>}
             </Text>
           );
         })}
       </Box>
       {showFooter && (
         <Box justifyContent="space-between" height={1} flexShrink={0}>
-          <Text color={panelMuted} backgroundColor={colors.board}>{fit(width >= 34 ? '↑ ↓ Move   Enter Select' : 'Enter Select', Math.max(0, width - matches.length - 1))}</Text>
-          <Text color={panelMuted} backgroundColor={colors.board}>{fit(matches, width)}</Text>
+          <Text color={panelMuted()} backgroundColor={colors.board}>{fit(width >= 34 ? '↑ ↓ Move   Enter Select' : 'Enter Select', Math.max(0, width - matches.length - 1))}</Text>
+          <Text color={panelMuted()} backgroundColor={colors.board}>{fit(matches, width)}</Text>
         </Box>
       )}
     </Box>
@@ -215,20 +222,29 @@ function ProviderPicker(props: CommandOverlayProps) {
 function ProviderModels({ requested, ...props }: CommandOverlayProps & { requested?: string }) {
   const cfg = configManager.get();
   const providerIds = useMemo(() => {
-    const ids = new Set(['ollama']);
-    if (requested && requested !== 'ollama') ids.add(requested);
-    if (cfg.activeProvider !== 'ollama') ids.add(cfg.activeProvider);
+    if (requested === 'all') return ProviderCatalog.all().map(({ id }) => id);
+    const ids: string[] = [];
+    const seen = new Set<string>();
+    const add = (id: string) => {
+      if (seen.has(id) || cfg.disconnectedProviders.includes(id)) return;
+      seen.add(id);
+      ids.push(id);
+    };
+    if (requested && requested !== 'ollama') add(requested);
+    add(cfg.activeProvider);
+    add('ollama');
     for (const provider of ProviderCatalog.all()) {
       if (provider.id === 'ollama' || ProviderCatalog.connection(provider.id) === 'catalog') continue;
-      if (configManager.getApiKey(provider.id, provider.envKey) || cfg.customEndpoints[provider.id]) ids.add(provider.id);
+      if (configManager.getApiKey(provider.id, provider.envKey) || cfg.customEndpoints[provider.id]) add(provider.id);
     }
-    return [...ids].filter((id) => !cfg.disconnectedProviders.includes(id));
+    return ids;
   }, [requested, cfg]);
   const [results, setResults] = useState<Record<string, Awaited<ReturnType<typeof ProviderManager.discoverModels>>>>({});
 
   useEffect(() => {
     let active = true;
     for (const providerId of providerIds) {
+      if (cfg.disconnectedProviders.includes(providerId)) continue;
       void ProviderManager.discoverModels(providerId).then((result) => {
         if (active) setResults((previous) => ({ ...previous, [providerId]: result }));
       }, () => {
@@ -236,21 +252,35 @@ function ProviderModels({ requested, ...props }: CommandOverlayProps & { request
       });
     }
     return () => { active = false; };
-  }, [providerIds]);
+  }, [providerIds, cfg]);
 
-  const groups: Group[] = providerIds.map((providerId) => {
+  const canSelect = (providerId: string) => providerId === 'ollama'
+    || ProviderCatalog.connection(providerId) !== 'catalog'
+    && Boolean(configManager.getApiKey(providerId, ProviderCatalog.get(providerId)?.envKey)
+      || cfg.customEndpoints[providerId]
+      || ProviderCatalog.get(providerId)?.requiresKey === false);
+
+  const groups: Group[] = providerIds.filter((id) => !cfg.disconnectedProviders.includes(id)).map((providerId) => {
     const result = results[providerId];
     const provider = result?.provider ?? ProviderCatalog.get(providerId);
     const label = providerId === 'ollama' ? 'Ollama' : provider?.name ?? providerId;
-    const status = providerId === 'ollama' && result?.status === 'live' ? 'installed'
-      : result?.status === 'live' ? 'live' : result?.status === 'catalog' ? 'catalog' : '';
+    const status = !result ? 'loading'
+      : providerId === 'ollama' && result.status === 'live' ? 'installed'
+        : result.status === 'live' ? result.detail ? 'partial' : 'live' : result.status === 'catalog' ? 'catalog' : '';
     const fill = props.onFill;
-    const manual: Row[] = fill && result && providerId !== 'ollama'
-      && ProviderCatalog.connection(providerId) !== 'catalog' && (result.status !== 'live' || !result.models.length)
+    const selectable = canSelect(providerId);
+    const manual: Row[] = fill && selectable && providerId !== 'ollama'
       ? [{ id: `manual:${providerId}`, label: 'Enter model ID', detail: 'Use a deployment model by name',
           activate: () => fill(`/model ${providerId} `) }]
       : [];
-    if (!result || result.models.length === 0) {
+    const preview = !result && provider
+      ? provider.popularModels.map((model) => ({
+        ...model,
+        chatSupport: selectable ? 'unknown' as const : 'unsupported' as const,
+      }))
+      : [];
+    const listed = result?.models ?? preview;
+    if (!listed.length) {
       return { title: label, rows: [{
         id: `verify:${providerId}`,
         label: result ? result.detail || (providerId === 'ollama' ? 'No models installed' : 'No models found') : 'Checking connection',
@@ -259,16 +289,40 @@ function ProviderModels({ requested, ...props }: CommandOverlayProps & { request
       }, ...manual] };
     }
 
-    const models: Row[] = result.models.map((model) => ({
+    const isActive = (id: string) => id === cfg.activeModel && providerId === cfg.activeProvider;
+    const ordered = [...listed].sort((left, right) =>
+      Number(isActive(right.id)) - Number(isActive(left.id))
+      || Number(Boolean(right.isDefault)) - Number(Boolean(left.isDefault))
+      || Number(Boolean(left.deprecated)) - Number(Boolean(right.deprecated))
+      || Number(left.chatSupport === 'unsupported') - Number(right.chatSupport === 'unsupported')
+      || (right.releasedAt ?? 0) - (left.releasedAt ?? 0)
+      || left.id.localeCompare(right.id));
+    const models: Row[] = ordered.map((model) => ({
       id: `${providerId}:${model.id}`,
-      label: model.id,
-      detail: [model.id === cfg.activeModel && providerId === cfg.activeProvider ? 'active' : '', model.chatSupport === 'unsupported' ? 'no chat' : model.supportsThinking ? 'reasoning' : ''].filter(Boolean).join(' · '),
-      searchable: model.name,
-      activate: model.chatSupport === 'unsupported' ? undefined : () => props.onCommand(`/model ${providerId} ${model.id}`),
+      label: model.name || model.id,
+      detail: [model.name && model.name !== model.id ? model.id : '', isActive(model.id) ? 'active' : '',
+        !result ? 'catalog' : '', model.deprecated ? 'deprecated' : '',
+        model.chatSupport === 'unsupported' ? 'no chat' : model.supportsThinking ? 'reasoning' : ''].filter(Boolean).join(' · '),
+      searchable: `${model.name} ${model.id}`,
+      activate: model.chatSupport === 'unsupported' || !selectable ? undefined
+        : () => props.onCommand(`/model ${providerId} ${model.id}`),
     }));
     return { title: status ? `${label} · ${status}` : label, rows: [...models, ...manual] };
   });
-  return <Picker {...props} title="Models" groups={groups} message="Search installed and cloud models" />;
+  const referenceGroups: Group[] = providerIds.flatMap((providerId) => {
+    const result = results[providerId];
+    if (!result) return [];
+    const listed = new Set(result.models.map(({ id }) => id.toLowerCase()));
+    const selectable = canSelect(providerId);
+    const rows = modelReferenceRows(providerId, listed).map(([id, label, status]): Row => ({
+      id: `reference:${providerId}:${id}`, label, searchable: id,
+      detail: status ?? 'Reference ID',
+      activate: selectable ? () => props.onCommand(`/model ${providerId} ${id}`) : undefined,
+    }));
+    return rows.length ? [{ title: `${ProviderCatalog.get(providerId)?.name ?? providerId} · reference`, rows }] : [];
+  });
+  return <Picker {...props} title="Models" groups={[...groups, ...referenceGroups]} browseReferences
+    message="Search all models · Enter to select" />;
 }
 
 function SetupField({ layout, title, value, masked, onChange, onDone, onCancel, hint }: {
@@ -300,7 +354,7 @@ function SetupField({ layout, title, value, masked, onChange, onDone, onCancel, 
     <Box flexDirection="column" width={width} height={height} overflow="hidden">
       <PanelHeader title={title} width={width} accent={accent} />
       <Text color={colors.ink} backgroundColor={colors.board}><Text color={accent}>{'› '}</Text>{fit(preview, Math.max(0, width - 3), true)}<Text inverse>{' '}</Text></Text>
-      <Text color={panelMuted} backgroundColor={colors.board}>{fit(hint ?? (masked ? 'Paste the key   Enter Done' : 'Enter Done'), width)}</Text>
+      <Text color={panelMuted()} backgroundColor={colors.board}>{fit(hint ?? (masked ? 'Paste the key   Enter Done' : 'Enter Done'), width)}</Text>
     </Box>
   );
 }
@@ -442,6 +496,8 @@ function CommandContent(props: CommandOverlayProps) {
       const provider = ProviderCatalog.get(view.providerId);
       return provider ? <ProviderSetup {...props} provider={provider} /> : <ProviderPicker {...props} />;
     }
+    case 'host':
+      return <HostMenu {...props} />;
     case 'effort': {
       return <EffortPicker {...props} />;
     }
@@ -454,24 +510,62 @@ function CommandContent(props: CommandOverlayProps) {
     }
     case 'settings':
       return <Settings {...props} />;
+    case 'theme':
+      return <ThemePicker {...props} />;
     case 'sessions': {
       const current = sessionManager.getSession();
       const rows: Row[] = [{ id: 'new', label: 'New chat', activate: () => onCommand('/new') }];
       const hidden: Row[] = [];
-      for (const session of SessionManager.listAll()) {
+      for (const session of SessionManager.listAll().filter((chat) => inWorkspace(chat.workspace))) {
         (session.hidden ? hidden : rows).push({ id: session.id, label: session.name, searchable: session.id,
           detail: session.id === current.id ? 'current' : `${session.messageCount} messages`,
           activate: () => onCommand(`/sessions ${session.id}`),
           menu: () => onView({ kind: 'session-menu', sessionId: session.id, fromSessions: true }) });
       }
       return <Picker {...props} title="Chats" groups={[{ rows }, { title: 'Hidden chats', rows: hidden }]}
-        message="Search saved chats · Right-click for options" />;
+        message={`Search saved chats · ${process.cwd()} · Right-click for options`} />;
     }
+    case 'workspace':
+      return <WorkspaceMenu {...props} />;
   }
 }
 
+function WorkspaceMenu(props: CommandOverlayProps) {
+  const cwd = process.cwd();
+  const key = workspaceKey(cwd);
+  const [entering, setEntering] = useState(false);
+  const [path, setPath] = useState('');
+  const [error, setError] = useState('');
+  const workspaces = new Map<string, string>();
+  for (const chat of SessionManager.listAll()) {
+    if (chat.workspace && workspaceKey(chat.workspace) !== key && !workspaces.has(workspaceKey(chat.workspace))) {
+      workspaces.set(workspaceKey(chat.workspace), chat.workspace);
+    }
+  }
+  if (entering) {
+    return <SetupField layout={props} title="Workspace path" value={path} masked={false}
+      onChange={setPath} onCancel={() => { setEntering(false); setError(''); }}
+      hint={error || 'Enter switch   Esc cancel   Ctrl+U clear'} onDone={() => {
+        const target = path.trim().replace(/^"|"$/g, '');
+        if (!target) return setError('Enter a folder path.');
+        setEntering(false);
+        props.onCommand(`/workspace "${target.replace(/"/g, '')}"`);
+      }} />;
+  }
+  const rows: Row[] = [
+    { id: 'current', label: cwd, detail: 'current workspace' },
+    ...[...workspaces.values()].map((dir): Row => ({
+      id: dir, label: dir, detail: 'switch workspace',
+      activate: () => props.onCommand(`/workspace "${dir.replace(/"/g, '')}"`),
+    })),
+    { id: 'enter', label: 'Enter path…', detail: 'Type a folder to switch to', activate: () => { setPath(''); setError(''); setEntering(true); } },
+  ];
+  return <Picker {...props} title="Workspace" groups={[{ rows }]}
+    message="Each folder keeps its own chats · Esc close" search={false} />;
+}
+
 function SessionMenu(props: CommandOverlayProps & { view: Extract<CommandView, { sessionId: string }> }) {
-  const { view, onView, onClose, onEditSession } = props;
+  const { view, onView, onClose, onEditSession, onDeleteSession } = props;
   const chat = SessionManager.listAll().find((item) => item.id === view.sessionId);
   const [name, setName] = useState(chat?.name ?? '');
   const [error, setError] = useState('');
@@ -494,6 +588,10 @@ function SessionMenu(props: CommandOverlayProps & { view: Extract<CommandView, {
         if (onEditSession(chat.id, { hidden: !chat.hidden })) close();
         else setError('Could not update the tab.');
       } },
+      ...(onDeleteSession ? [{ id: 'delete', label: 'Delete chat', activate: () => {
+        if (onDeleteSession(chat.id)) close();
+        else setError('Could not delete the chat.');
+      } }] : []),
     ] }]} />;
 }
 
@@ -571,6 +669,7 @@ function Settings(props: CommandOverlayProps) {
         if (maxTokens !== undefined && (!Number.isSafeInteger(maxTokens) || maxTokens < 1)) throw new Error('Enter a positive whole number or leave it blank.');
         configManager.update({ maxTokens });
       }, cfg.maxTokens?.toString() ?? ''),
+      toggle('autocompact', 'Auto-compact context', cfg.autoCompact, () => configManager.update({ autoCompact: !cfg.autoCompact })),
     ] },
     { title: 'Local Ollama', rows: [
       edit('host', 'Ollama server URL', configManager.getOllamaHost(), (raw) => {
@@ -585,10 +684,57 @@ function Settings(props: CommandOverlayProps) {
     { title: 'Interface and files', rows: [
       toggle('animations', 'Animations', cfg.animationsEnabled, () => configManager.update({ animationsEnabled: !cfg.animationsEnabled })),
       { id: 'config', label: 'Show configuration', detail: 'Redacted JSON', activate: () => onCommand('/config show') },
+      { id: 'theme', label: 'Theme', detail: cfg.theme, activate: () => onView({ kind: 'theme' }) },
+      toggle('deletechats', 'Delete chats on tab close', cfg.deleteChatsOnClose === true, () => configManager.update({ deleteChatsOnClose: !cfg.deleteChatsOnClose })),
+      toggle('workspacechats', 'Chats with workspaces', cfg.workspaceChats === true, () => configManager.update({ workspaceChats: !cfg.workspaceChats })),
       { id: 'workspace', label: 'Write workspace config', detail: 'ruqenai.json', activate: () => onCommand('/init') },
     ] },
   ];
   return <Picker {...props} title="Settings" groups={groups} initialId={selected} search={false} message={message} />;
+}
+
+function ThemePicker(props: CommandOverlayProps) {
+  const cfg = configManager.get();
+  const rows: Row[] = themeNames.map((name) => ({
+    id: name,
+    label: name[0].toUpperCase() + name.slice(1),
+    detail: name === cfg.theme ? 'current' : undefined,
+    activate: () => {
+      configManager.update({ theme: name });
+      applyTheme(name);
+      props.onChanged?.();
+    },
+  }));
+  return <Picker {...props} title="Theme" groups={[{ rows }]} search={false}
+    message="Accent, surfaces, and syntax colors · eco chats still override to green" />;
+}
+
+function HostMenu(props: CommandOverlayProps) {
+  const [version, setVersion] = useState(0);
+  const [code, setCode] = useState('');
+  const port = lanHostPort();
+  const running = port !== undefined;
+  const address = `${lanHostAddress()}:${port ?? 41418}`;
+  useEffect(() => {
+    let mounted = true;
+    mobilePairingCode().then((value) => { if (mounted) setCode(value); }, () => {});
+    return () => { mounted = false; };
+  }, [version]);
+  const rows: Row[] = [
+    { id: 'on', label: 'On', detail: running ? 'hosting now' : 'Start the Android companion host',
+      activate: () => { startLanHost().then(() => setVersion((v) => v + 1), () => {}); } },
+    { id: 'off', label: 'Off', detail: running ? undefined : 'not hosting',
+      activate: () => { stopLanHost().then(() => setVersion((v) => v + 1), () => {}); } },
+  ];
+  if (running) rows.push(
+    { id: 'address', label: address, detail: 'Select to copy the address',
+      activate: () => { void copyToClipboard(address); } },
+    { id: 'code', label: code || 'Loading pairing code…', detail: 'Select to copy the pair code',
+      activate: () => { if (code) void copyToClipboard(code); } },
+  );
+  return <Picker {...props} title="Companion host" groups={[{ rows }]} initialId={running ? 'off' : 'on'} search={false}
+    message={running ? 'Your phone can connect on this Wi-Fi network'
+      : 'Pair code and LAN address appear when hosting'} />;
 }
 
 function EffortPicker(props: CommandOverlayProps) {

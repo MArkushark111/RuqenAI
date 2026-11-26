@@ -1,11 +1,11 @@
 {
   "name": "ruqenai",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Terminal coding assistant with local and cloud model support",
   "type": "module",
   "main": "dist/index.js",
   "bin": {
-    "ruqenai": "./bin/ruqenai.js"
+    "ruqenai": "bin/ruqenai.js"
   },
   "files": [
     "dist",
@@ -16,7 +16,11 @@
   "scripts": {
     "start": "tsx src/index.tsx",
     "dev": "tsx watch src/index.tsx",
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsx tests/tool-history.test.ts",
+    "desktop:build": "node desktop/build.mjs",
+    "desktop:dev": "npm run desktop:build && electron dist-desktop/main.js",
+    "desktop:package": "npm run desktop:build && electron-builder --config electron-builder.config.js"
   },
   "keywords": [
     "ai",
@@ -37,18 +41,33 @@
     "commander": "^13.1.0",
     "diff": "^9.0.0",
     "dotenv": "^16.4.7",
+    "fflate": "^0.8.2",
     "figures": "^6.1.0",
     "ink": "^5.1.0",
     "ink-select-input": "^6.0.0",
     "lowlight": "^3.3.0",
+    "node-pty": "^1.0.0",
     "react": "^18.3.1",
+    "selfsigned": "^5.5.0",
     "string-width": "^7.2.0",
     "wrap-ansi": "^9.0.2"
   },
   "devDependencies": {
     "@types/node": "^22.13.9",
     "@types/react": "^18.3.18",
+    "@xterm/xterm": "^5.5.0",
+    "ascii.rest": "0.4.0",
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8",
+    "esbuild": "^0.24.0",
+    "rcedit": "^5.0.2",
     "tsx": "^4.19.3",
     "typescript": "^5.8.2"
+  },
+  "allowScripts": {
+    "electron@33.4.11": true,
+    "esbuild@0.24.2": true,
+    "esbuild@0.28.2": true,
+    "node-pty@1.1.0": true
   }
 }

@@ -3,7 +3,7 @@ import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import { Spinner } from './ActivityPanel.js';
 import { useMouse } from './MouseListener.js';
-import { colors } from './terminal.js';
+import { mixHex, themePalette } from './terminal.js';
 import type { DOMElement } from 'ink';
 import { mouseOrigin } from './mouseBounds.js';
 
@@ -12,6 +12,7 @@ export interface ChatTab {
   label: string;
   selected?: boolean;
   fixed?: boolean;
+  eco?: boolean;
 }
 
 interface Segment {
@@ -27,7 +28,7 @@ export function ChatTabs({ tabs, width, blocked, busy, animate = true, onSelect,
   tabs: ChatTab[];
   width: number;
   blocked: boolean;
-  busy?: string;
+  busy?: string | ReadonlySet<string>;
   animate?: boolean;
   onSelect: (id: string) => void;
   onClose: (id: string) => void;
@@ -41,9 +42,10 @@ export function ChatTabs({ tabs, width, blocked, busy, animate = true, onSelect,
   const pressed = useRef<string>();
   const moved = useRef(false);
   const element = useRef<DOMElement>(null);
+  const isBusy = (id: string) => typeof busy === 'string' ? busy === id : Boolean(busy?.has(id));
 
   const gap = 1;
-  const spanFor = (tab: ChatTab) => stringWidth(tab.label) + (tab.fixed ? 2 : 4) + (tab.id === busy ? 2 : 0);
+  const spanFor = (tab: ChatTab) => stringWidth(tab.label) + (tab.fixed ? 2 : 4) + (isBusy(tab.id) ? 2 : 0);
   const total = tabs.reduce((size, tab) => size + spanFor(tab) + gap, -gap);
   const overflow = total > width;
   const keep = tabs.filter((tab) => tab.selected || tab.fixed);
@@ -59,7 +61,7 @@ export function ChatTabs({ tabs, width, blocked, busy, animate = true, onSelect,
   if (overflow) visible.push({ id: '__overflow__', label: `… ${tabs.length - visible.length}`, fixed: true });
   let used = 0;
   const segments: Segment[] = visible.map((tab, index) => {
-    const spin = tab.id === busy ? 2 : 0;
+    const spin = isBusy(tab.id) ? 2 : 0;
     const start = used + (index === 0 ? 0 : gap);
     const span = spanFor(tab);
     const segment: Segment = { tab, start, end: start + span, spin };
@@ -148,17 +150,23 @@ export function ChatTabs({ tabs, width, blocked, busy, animate = true, onSelect,
           const { tab } = segment;
           const active = !blocked && tab.id === hover;
           const lifted = tab.id === dragId;
-          const surface = tab.selected || lifted ? '#342A23' : active ? '#2B231E' : tab.fixed ? undefined : '#1A1715';
-          const foreground = tab.selected ? colors.coffee : active ? colors.ink : '#A9A19A';
+          // Each tab uses the theme palette (not the live eco overlay) plus its own eco flag,
+          // so an eco chat never recolors the other tabs.
+          const palette = themePalette();
+          const accent = tab.eco ? '#8FE388' : palette.coffee;
+          const surface = tab.selected || lifted ? mixHex(palette.board, accent, 0.2)
+            : active ? mixHex(palette.board, accent, 0.11)
+            : tab.fixed ? undefined : palette.board;
+          const foreground = tab.selected ? accent : active ? palette.ink : palette.muted;
           return (
             <React.Fragment key={tab.id}>
               {index > 0 && ' '.repeat(gap)}
               <Text backgroundColor={surface} color={foreground} bold={tab.selected || lifted}>{` ${tab.label} `}</Text>
               {segment.spin > 0 && (
-                <Text backgroundColor={surface} color={colors.coffee}><Spinner active animate={animate} />{' '}</Text>
+                <Text backgroundColor={surface} color={accent}><Spinner active animate={animate} />{' '}</Text>
               )}
               {!tab.fixed && (
-                <Text backgroundColor={surface} bold={hoverClose === tab.id} color={hoverClose === tab.id ? colors.error : colors.muted}>× </Text>
+                <Text backgroundColor={surface} bold={hoverClose === tab.id} color={hoverClose === tab.id ? palette.error : palette.muted}>× </Text>
               )}
             </React.Fragment>
           );

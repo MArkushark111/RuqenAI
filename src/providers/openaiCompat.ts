@@ -1,6 +1,8 @@
 import type { ChatMessage, ProviderMetadata, StreamChunk, ToolCall } from '../types/index.js';
 import { describeHttpError, describeStreamError } from './errors.js';
+import { observeRateLimit, parseRateLimit } from './rateLimit.js';
 import { compatibleTools, sseData } from './stream.js';
+import { sanitizeToolHistory } from './toolHistory.js';
 import { type ChatOptions, readUsage } from './types.js';
 
 interface ToolDelta {
@@ -14,27 +16,62 @@ export function compatibleHeaders(providerId: string, apiKey?: string): Record<s
   return providerId === 'azure-openai' ? { 'api-key': apiKey } : { Authorization: 'Bearer ' + apiKey };
 }
 
-function compatibleHistory(providerId: string, messages: ChatMessage[]) {
-  return messages.map((message) => ({
-    role: message.role,
-    content: message.images?.length ? [
-      { type: 'text', text: message.content },
-      ...message.images.map(({ mediaType, data }) => ({ type: 'image_url', image_url: { url: `data:${mediaType};base64,${data}` } })),
-    ] : message.content || (message.toolCalls?.length ? null : ''),
-    tool_call_id: message.role === 'tool' ? message.toolCallId : undefined,
-    reasoning_content: ['deepseek', 'moonshot'].includes(providerId) && message.toolCalls?.length
-      ? message.reasoningContent
-      : undefined,
-    tool_calls: message.toolCalls?.map((call) => ({
-      id: call.id,
-      type: 'function',
-      function: { name: call.name, arguments: call.arguments },
-    })),
-  }));
+/** Kimi and DeepSeek thinking models expect their reasoning echoed back in history. */
+function usesReasoningContent(providerId: string, baseUrl: string): boolean {
+  const id = providerId.toLowerCase();
+  return id === 'moonshot' || id === 'kimi' || id === 'deepseek'
+    || /api\.moonshot\.ai|moonshot\.cn|\/kimi(?:[-/.]|$)/i.test(baseUrl);
 }
 
-function buildPayload(providerId: string, model: string, messages: ChatMessage[], options: ChatOptions) {
-  const payload: Record<string, unknown> = { model, messages: compatibleHistory(providerId, messages), stream: true };
+export function compatibleHistory(providerId: string, messages: ChatMessage[], baseUrl = '') {
+  const reasoningField = usesReasoningContent(providerId, baseUrl);
+  const history: Array<Record<string, unknown>> = [];
+  const deferredImages: Array<Record<string, unknown>> = [];
+  const flushImages = () => {
+    if (deferredImages.length) history.push(...deferredImages.splice(0));
+  };
+  // Last line of defence: no provider ever sees an assistant tool_calls turn without
+  // a matching tool response for each id, regardless of how the history was assembled.
+  for (const message of sanitizeToolHistory(messages)) {
+    if (message.role !== 'tool') flushImages();
+    const imageParts = (message.images ?? []).map(({ mediaType, data }) =>
+      ({ type: 'image_url', image_url: { url: `data:${mediaType};base64,${data}` } }));
+    const entry: Record<string, unknown> = {
+      role: message.role,
+      content: message.images?.length ? [
+        { type: 'text', text: message.content },
+        ...imageParts,
+      ] : message.content || (message.toolCalls?.length ? null : ''),
+      tool_call_id: message.role === 'tool' ? message.toolCallId : undefined,
+      reasoning_content: reasoningField && message.role === 'assistant' && message.reasoningContent
+        ? message.reasoningContent
+        : undefined,
+    };
+    // DeepSeek rejects `tool_calls: []` (minimum length 1). Omit the field entirely when empty.
+    if (message.toolCalls?.length) {
+      entry.tool_calls = message.toolCalls.map((call) => ({
+        id: call.id,
+        type: 'function',
+        function: { name: call.name, arguments: call.arguments },
+      }));
+    }
+    if (message.role === 'tool' && imageParts.length) {
+      entry.content = message.content;
+      // Images are a separate user entry; deferring it keeps every tool response
+      // directly next to its siblings until the whole group has been emitted.
+      deferredImages.push({
+        role: 'user',
+        content: [{ type: 'text', text: '[Image attached to the tool result]' }, ...imageParts],
+      });
+    }
+    history.push(entry);
+  }
+  flushImages();
+  return history;
+}
+
+function buildPayload(providerId: string, model: string, messages: ChatMessage[], options: ChatOptions, baseUrl = '') {
+  const payload: Record<string, unknown> = { model, messages: compatibleHistory(providerId, messages, baseUrl), stream: true };
   const openAi = ['openai', 'azure-openai'].includes(providerId);
   const reasoningModel = /^(?:o[134](?:-|$)|gpt-5(?:[.-]|$))/.test(model);
   const effort = (options.thinkingEffort ?? 'High').toLowerCase();
@@ -108,10 +145,14 @@ export class OpenAICompatClient {
         headers: { 'Content-Type': 'application/json', ...compatibleHeaders(provider.id, apiKey) },
         signal: options.signal,
         redirect: 'error',
-        body: JSON.stringify(buildPayload(provider.id, model, messages, options)),
+        body: JSON.stringify(buildPayload(provider.id, model, messages, options, baseUrl)),
       });
       if (!response.ok) {
-        yield { error: await describeHttpError(provider.name, response, apiKey) };
+        const detail = await describeHttpError(provider.name, response, apiKey);
+        if (response.status === 429) {
+          observeRateLimit(provider.id, parseRateLimit(detail, response.headers.get('retry-after')));
+        }
+        yield { error: detail };
         return;
       }
       if (response.headers.get('content-type')?.includes('application/json')) {
@@ -130,7 +171,7 @@ export class OpenAICompatClient {
           return;
         }
         yield { text, reasoning: reply.reasoning_content ?? reply.reasoning, usage: responseUsage(provider.id, event.usage),
-          toolCalls: toolCalls.length ? toolCalls : undefined, isDone: true };
+          toolCalls: toolCalls.length ? toolCalls : undefined, isDone: true, finishReason: reply.finish_reason };
         return;
       }
       if (!response.body) {
@@ -180,7 +221,7 @@ export class OpenAICompatClient {
         yield { error: provider.name + ' returned an empty chat response' + (finishReason ? ' (' + finishReason + ').' : '.') };
         return;
       }
-      yield { isDone: true, toolCalls: complete && calls.length ? calls : undefined };
+      yield { isDone: true, finishReason, toolCalls: complete && calls.length ? calls : undefined };
     } catch (error) {
       options.signal?.throwIfAborted();
       yield { error: describeStreamError(provider.name, error, apiKey) };

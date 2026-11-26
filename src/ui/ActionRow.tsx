@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from 'react';
 import { Box, Text } from 'ink';
 import stringWidth from 'string-width';
 import { useMouse } from './MouseListener.js';
-import { colors, fill } from './terminal.js';
+import { colors, fill, mixHex } from './terminal.js';
 import type { DOMElement } from 'ink';
 import { mouseOrigin } from './mouseBounds.js';
 
@@ -65,11 +65,13 @@ export function ActionRow({ actions, width, trailing = '', background, animate =
               backgroundColor={highlighted ? colors.rule : undefined}>
               {action.glow ? [...action.label].map((character, index) => {
                 const light = Math.max(0, 3 - Math.abs(index - phase + 3));
+                const ramp = [0, 0.35, 0.55, 0.75].map((t) => mixHex(colors.coffee, '#FFFFFF', t));
                 const foreground = light
-                  ? ['#D0AA88', '#E0BA95', '#EBC9A8', '#F8E4CE'][light]
-                  : index < action.label.length / 2 ? '#CCA583' : '#DAB591';
+                  ? ramp[light]
+                  : index < action.label.length / 2 ? colors.coffee : mixHex(colors.coffee, '#FFFFFF', 0.15);
+                const glowBg = light ? [0, 0.35, 0.27, 0.19][light] : highlighted ? 0.22 : 0.14;
                 return <Text key={index} bold color={foreground}
-                  backgroundColor={light ? '#483426' : highlighted ? '#392D24' : '#2A211B'}>{character}</Text>;
+                  backgroundColor={mixHex('#000000', colors.coffee, glowBg)}>{character}</Text>;
               }) : action.label}
             </Text>
           </React.Fragment>;

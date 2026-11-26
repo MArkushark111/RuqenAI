@@ -21,6 +21,10 @@ Ruqenai brings chat, workspace tools, and model selection into one terminal inte
 
 The desktop app has dark and light themes, a searchable conversation sidebar, workspace projects, adjustable reasoning effort, and animated ASCII backgrounds.
 
+In 1.1.0, desktop backgrounds can use local images or videos rendered as animated dots. The chat has a compact sidebar, clearer attachment cards, and distinct progress animation for thinking, writing, and terminal commands. `@Computer` invokes Windows computer control in a vision-capable chat; Ruqenai shows a blue screen border while it operates, returns a screenshot after each action, and Esc cancels control. Computer screenshots are sent to the selected model provider for interpretation.
+
+The Windows installer is available in [GitHub Releases](https://github.com/MArkushark111/RuqenAI/releases). The desktop app checks the latest release at startup, downloads a newer installer in the background, and waits for you to choose **Install**. Installing from an update preserves chats and saved provider settings in your user profile.
+
 ![Ruqenai desktop in dark mode](docs/media/desktop-dark.png)
 
 ![Desktop conversation with example content](docs/media/desktop-chat.png)

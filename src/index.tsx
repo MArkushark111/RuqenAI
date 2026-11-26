@@ -5,6 +5,7 @@
 
 import { Command, Option } from 'commander';
 import { registerConnectorCommands } from './commands/connectors.js';
+import { installedVersion } from './updates.js';
 
 const program = new Command();
 registerConnectorCommands(program);
@@ -12,10 +13,11 @@ registerConnectorCommands(program);
 program
   .name('ruqenai')
   .description('Coding assistant for the terminal')
-  .version('1.0.0')
+  .option('--lan', 'Host the Android companion on your local network')
+  .version(installedVersion)
   .showHelpAfterError('(See ruqenai --help for usage.)');
 
-program.action(async () => {
+program.action(async ({ lan }: { lan?: boolean }) => {
   if (!process.stdin.isTTY || !process.stdout.isTTY) {
     console.error('Ruqenai needs an interactive terminal. Use `ruqenai run "prompt"` for headless output.');
     process.exitCode = 1;
@@ -32,15 +34,22 @@ program.action(async () => {
     import('./ui/MouseListener.js'), import('./ui/FrameOutput.js'), import('./agent/context.js'),
   ]);
   sessionManager.startFreshSession();
+  const host = lan ? await (await import('./lan/host.js')).startLanHost() : undefined;
   const input = useAlternateScreen ? createTerminalInput(process.stdin) : undefined;
   const frames = useAlternateScreen ? createFrameOutput(process.stdout) : undefined;
   if (useAlternateScreen) process.stdout.write('\x1b[?1049h\x1b[H\x1b[?2004h');
   try {
     await render(createElement(App, { onPaste: input?.onPaste }), { stdin: input?.stdin ?? process.stdin, stdout: frames?.stdout ?? process.stdout, debug: useAlternateScreen }).waitUntilExit();
   } finally {
+    host?.close();
     frames?.stop();
     if (useAlternateScreen) process.stdout.write('\x1b[?2004l\x1b[?1049l');
   }
+});
+
+program.command('pair').description('Print the Android companion pairing code').action(async () => {
+  const { mobilePairingCode } = await import('./lan/host.js');
+  console.log(await mobilePairingCode());
 });
 
 program
@@ -117,25 +126,26 @@ program
 
 program
   .command('models [provider]')
-  .description('List installed and configured provider models')
+  .description('List configured models, or use all to include every provider catalog')
   .action(async (selected?: string) => {
     const [{ configManager }, { ProviderCatalog }, { ProviderManager }] = await Promise.all([
       import('./config/settings.js'), import('./providers/catalog.js'), import('./providers/manager.js'),
     ]);
-    if (selected && !ProviderCatalog.get(selected)) {
+    if (selected && selected !== 'all' && !ProviderCatalog.get(selected)) {
       console.error('Unknown provider. Use `ruqenai providers` to list IDs.');
       process.exitCode = 1;
       return;
     }
     const config = configManager.get();
-    const ids = selected ? [selected] : [...new Set(['ollama', config.activeProvider, ...ProviderCatalog.all()
+    const ids = selected === 'all' ? ProviderCatalog.all().map(({ id }) => id).filter((id) => !config.disconnectedProviders.includes(id))
+      : selected ? [selected] : [...new Set(['ollama', config.activeProvider, ...ProviderCatalog.all()
       .filter(({ id, envKey }) => ProviderCatalog.connection(id) !== 'catalog'
         && (configManager.getApiKey(id, envKey) || config.customEndpoints[id]))
       .map(({ id }) => id)])].filter((id) => !config.disconnectedProviders.includes(id));
     const groups = await Promise.all(ids.map((id) => ProviderManager.discoverModels(id)));
     const output = groups.map(({ provider, models, status, detail }) => {
       const label = provider?.id === 'ollama' ? 'Ollama' : provider?.name ?? 'Provider';
-      const rows = status === 'unavailable' ? [] : models.map(({ id }) => '  ' + id);
+      const rows = status === 'unavailable' ? [] : models.map(({ id, deprecated }) => '  ' + id + (deprecated ? ' (deprecated)' : ''));
       const title = label + (status === 'live' ? ` models (${models.length})` : ` · ${status}`);
       return [title, ...(detail ? ['  ' + detail] : []), ...rows].join('\n');
     });

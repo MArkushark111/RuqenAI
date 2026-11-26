@@ -23,15 +23,31 @@ export interface RuqenaiConfig {
   permissionMode: PermissionMode;
   ollamaHost: string;
   ollamaAutoDetect: boolean;
-  theme: 'ultracode' | 'cyberpunk' | 'dark' | 'matrix';
+  theme: string;
   animationsEnabled: boolean;
   autoCompact: boolean;
   compactThreshold: number;
+  deleteChatsOnClose?: boolean;
+  /** On: chats are filtered per workspace folder. Off (default): every chat shows in every workspace. */
+  workspaceChats?: boolean;
+  /** ASCII hero scene on an empty chat. Off shows a plain background instead. */
+  homeSceneEnabled?: boolean;
+  /** Absolute path to a custom new-chat background image. */
+  homeBackground?: string | null;
+  /** Selected desktop backdrop, or 'rotate' to cycle scenes. */
+  homeScene?: string;
+  darkDotsColored?: boolean;
+  chatBackgroundVisible?: boolean;
+  chatBackgroundOpacity?: number;
+  homeSuggestionsVisible?: boolean;
+  /** User-authored CSS applied to the whole app. */
+  customCss?: string;
   customEndpoints: Record<string, string>;
   modelRates: Record<string, TokenRates>;
   disconnectedProviders: string[];
   approvedCommands: string[];
   approvedPaths: string[];
+  approvedMcpActions: string[];
 }
 
 const GLOBAL_CONFIG_DIR = path.join(os.homedir(), '.ruqenai');
@@ -52,12 +68,19 @@ const DEFAULT_CONFIG: RuqenaiConfig = {
   theme: 'dark',
   animationsEnabled: true,
   autoCompact: true,
-  compactThreshold: 40,
+  compactThreshold: 28,
+  deleteChatsOnClose: false,
+  workspaceChats: false,
+  homeSceneEnabled: true,
+  homeBackground: null,
+  homeScene: 'rotate',
+  customCss: '',
   customEndpoints: {},
   modelRates: {},
   disconnectedProviders: [],
   approvedCommands: ['ls', 'dir', 'git status', 'git diff', 'pwd'],
   approvedPaths: [],
+  approvedMcpActions: [],
 };
 
 function keyVariable(providerId: string): string {
@@ -65,15 +88,33 @@ function keyVariable(providerId: string): string {
 }
 
 function writePrivateFile(destination: string, text: string): boolean {
-  const temporary = path.join(path.dirname(destination), '.ruqenai-' + randomUUID() + '.tmp');
+  const temporary = () => path.join(path.dirname(destination), '.ruqenai-' + randomUUID() + '.tmp');
+  const atomic = () => {
+    const temp = temporary();
+    try {
+      fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(temp, text, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
+      fs.renameSync(temp, destination);
+    } finally {
+      try { fs.unlinkSync(temp); } catch {}
+    }
+  };
   try {
-    fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
-    fs.writeFileSync(temporary, text, { encoding: 'utf-8', mode: 0o600, flag: 'wx' });
-    fs.renameSync(temporary, destination);
+    // Windows AV/indexers occasionally lock the target; retry once, then fall back to a direct write.
+    try {
+      atomic();
+    } catch {
+      atomic();
+    }
     return true;
   } catch {
-    try { fs.unlinkSync(temporary); } catch {}
-    return false;
+    try {
+      fs.mkdirSync(path.dirname(destination), { recursive: true, mode: 0o700 });
+      fs.writeFileSync(destination, text, { encoding: 'utf-8', mode: 0o600 });
+      return true;
+    } catch {
+      return false;
+    }
   }
 }
 
@@ -103,12 +144,10 @@ function writeKeyEnv(values: Record<string, string>): boolean {
 
 class ConfigManager {
   private config: RuqenaiConfig;
-  private workspaceDir: string;
   private legacyKeys: Record<string, unknown> = {};
   private loadedGlobal: Partial<RuqenaiConfig> = {};
 
-  constructor(workspaceDir: string = process.cwd()) {
-    this.workspaceDir = workspaceDir;
+  constructor() {
     this.config = this.loadConfig();
     this.migrateLegacyKeys();
   }
@@ -121,7 +160,15 @@ class ConfigManager {
     const modelExplicit = patch.activeModel !== undefined ? rememberModel : this.config.modelExplicit;
     this.config = { ...this.config, ...patch, modelExplicit };
     this.saveGlobal();
+    // Keep the workspace ruqenai.json in sync so a stale workspace file can never
+    // silently override a setting the user just changed.
+    this.saveWorkspace();
     return this.config;
+  }
+
+  /** Re-read global + current workspace config after the working directory changes. */
+  public reloadWorkspace(): void {
+    this.config = this.loadConfig();
   }
 
   public hasSelectedModel(): boolean {
@@ -148,12 +195,13 @@ class ConfigManager {
       } catch {}
     }
 
-    // 2. Load workspace file
-    const wsPath = path.join(this.workspaceDir, WORKSPACE_CONFIG_FILE);
+    // 2. Load workspace file from the current working directory (follows /cd and /workspace).
+    const wsPath = path.join(process.cwd(), WORKSPACE_CONFIG_FILE);
     if (fs.existsSync(wsPath)) {
       try {
         const raw = fs.readFileSync(wsPath, 'utf-8');
-        const { apiKeys, customEndpoints, disconnectedProviders, ollamaHost, permissionMode, approvedCommands, approvedPaths, ...workspace } = JSON.parse(raw);
+        const { apiKeys, customEndpoints, disconnectedProviders, ollamaHost, permissionMode,
+          approvedCommands, approvedPaths, approvedMcpActions, ...workspace } = JSON.parse(raw);
         loaded = { ...loaded, ...workspace };
       } catch {}
     }
@@ -162,6 +210,7 @@ class ConfigManager {
     const merged: RuqenaiConfig = {
       ...DEFAULT_CONFIG,
       ...settings,
+      approvedMcpActions: Array.isArray(loaded.approvedMcpActions) ? loaded.approvedMcpActions : [],
       modelRates: { ...(loaded.modelRates || {}) },
       modelExplicit: loaded.modelExplicit ?? (
         loaded.activeModel !== undefined &&
@@ -220,7 +269,8 @@ class ConfigManager {
   public saveWorkspace(): boolean {
     try {
       const wsPath = path.join(process.cwd(), WORKSPACE_CONFIG_FILE);
-      const { customEndpoints, disconnectedProviders, ollamaHost, permissionMode, approvedCommands, approvedPaths, ...workspace } = this.config;
+      const { customEndpoints, disconnectedProviders, ollamaHost, permissionMode,
+        approvedCommands, approvedPaths, approvedMcpActions, ...workspace } = this.config;
       fs.writeFileSync(wsPath, JSON.stringify(workspace, null, 2), 'utf-8');
       return true;
     } catch {

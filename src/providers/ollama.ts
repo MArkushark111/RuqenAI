@@ -216,7 +216,7 @@ export class OllamaClient {
         if (event.done) {
           const usage = readUsage(event.prompt_eval_count, event.eval_count);
           const complete = !event.done_reason || event.done_reason === 'stop';
-          yield { isDone: true, usage, toolCalls: complete && toolCalls.length ? toolCalls : undefined };
+          yield { isDone: true, finishReason: event.done_reason, usage, toolCalls: complete && toolCalls.length ? toolCalls : undefined };
           return;
         }
       }

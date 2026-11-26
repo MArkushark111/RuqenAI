@@ -7,7 +7,10 @@ import path from 'node:path';
 import os from 'node:os';
 import { randomUUID } from 'node:crypto';
 import { ChatMessage, ProviderUsage } from '../types/index.js';
+import { configManager } from '../config/settings.js';
+import { sanitizeToolHistory } from '../providers/toolHistory.js';
 import { mergeUsage } from '../providers/usage.js';
+import { restoreFiles } from './workspace.js';
 
 export interface SavedSession {
   id: string;
@@ -17,11 +20,16 @@ export interface SavedSession {
   branchFrom?: string;
   hidden?: boolean;
   titleEdited?: boolean;
+  /** Absolute workspace folder this chat belongs to. Missing on sessions saved before workspaces existed. */
+  workspace?: string;
+  /** Eco mode is per-chat: terse replies, thinking off, green theme while this chat is open. */
+  ecoMode?: boolean;
   messages: ChatMessage[];
   attachedFiles: string[];
   totalTokens: number;
   usage?: ProviderUsage;
   contextStart?: number;
+  contextSummary?: string;
 }
 
 const GLOBAL_DIR = path.join(os.homedir(), '.ruqenai');
@@ -34,6 +42,18 @@ function validSessionId(id: string): boolean {
 
 export const DEFAULT_SESSION_NAME = 'Untitled';
 
+export function workspaceKey(dir: string | undefined): string {
+  if (!dir) return '';
+  const resolved = path.resolve(dir);
+  return process.platform === 'win32' ? resolved.toLowerCase() : resolved;
+}
+
+/** With "Chats with workspaces" off (default) every chat shows in every workspace. */
+export function inWorkspace(workspace: string | undefined): boolean {
+  if (configManager.get().workspaceChats !== true) return true;
+  return !workspace || workspaceKey(workspace) === workspaceKey(process.cwd());
+}
+
 function normalizeSessionName(name: unknown, id: string): string {
   const value = typeof name === 'string' ? name.trim() : '';
   if (!value || value === `Session ${id}`) return DEFAULT_SESSION_NAME;
@@ -42,6 +62,7 @@ function normalizeSessionName(name: unknown, id: string): string {
 
 export class SessionManager {
   private currentSession: SavedSession;
+  private readonly changeListeners = new Set<() => void>();
 
   constructor(sessionId: string = 'default') {
     if (!fs.existsSync(SESSIONS_DIR)) {
@@ -54,6 +75,30 @@ export class SessionManager {
 
   public getSession(): SavedSession {
     return this.currentSession;
+  }
+
+  public getSavedSession(id: string): SavedSession | undefined {
+    return this.currentSession.id === id ? this.currentSession : this.readSession(id);
+  }
+
+  public createSavedChat(name?: string): SavedSession {
+    const session = this.createSession(`session-${Date.now()}-${randomUUID().slice(0, 8)}`);
+    if (name) {
+      session.name = name;
+      session.titleEdited = true;
+    }
+    if (!this.save(session, 'wx')) throw new Error('Could not create the chat.');
+    this.notifyExternalChange();
+    return session;
+  }
+
+  public onExternalChange(listener: () => void): () => void {
+    this.changeListeners.add(listener);
+    return () => { this.changeListeners.delete(listener); };
+  }
+
+  public notifyExternalChange(): void {
+    for (const listener of this.changeListeners) listener();
   }
 
   public focusSession(session: SavedSession): void {
@@ -101,6 +146,7 @@ export class SessionManager {
       name: DEFAULT_SESSION_NAME,
       createdAt: now,
       updatedAt: now,
+      workspace: path.resolve(process.cwd()),
       messages: [],
       attachedFiles: [],
       totalTokens: 0,
@@ -145,13 +191,34 @@ export class SessionManager {
     this.save(session);
   }
 
+  public appendPhoneMessage(message: ChatMessage, session: SavedSession): void {
+    const usage = session.usage ? { ...session.usage } : undefined;
+    const next = {
+      ...session, messages: [...session.messages, message], totalTokens: session.totalTokens + (message.tokens ?? 0),
+      usage: message.usage ? usage ?? {} : usage,
+    };
+    if (message.usage) mergeUsage(next.usage!, message.usage);
+    if (!this.save(next)) throw new Error('Could not save the message.');
+    Object.assign(session, next);
+    this.notifyExternalChange();
+  }
+
+  public clearTasks(session = this.currentSession): boolean {
+    const messages = session.messages.map((message) => message.tasks
+      ? { ...message, tasks: message.tasks.filter((task) => task.kind !== 'plan') }
+      : message);
+    if (!this.save({ ...session, messages }, 'w', true)) return false;
+    session.messages = messages;
+    return true;
+  }
+
   public sendPrompt(message: ChatMessage, session = this.currentSession): void {
     const next = { ...session, messages: [...session.messages, message], attachedFiles: [] };
     if (!this.save(next)) throw new Error('Could not save the prompt. Your attachments are still queued.');
     Object.assign(session, next);
   }
 
-  public undoLastTurn(): ChatMessage | undefined {
+  public async undoLastTurn({ chatOnly = false } = {}): Promise<{ restored: number } | undefined> {
     const session = this.currentSession;
     const messages = session.messages;
     let index = messages.length - 1;
@@ -160,17 +227,25 @@ export class SessionManager {
     const removed = messages[index];
     const start = removed.role === 'assistant' && messages[index - 1]?.role === 'user' ? index - 1 : index;
     const count = index - start + 1;
-    messages.splice(start, count);
-    if (session.contextStart !== undefined && start < session.contextStart) {
-      session.contextStart -= Math.min(count, session.contextStart - start);
+    const next = { ...session, messages: [...messages.slice(0, start), ...messages.slice(index + 1)] };
+    if (next.contextStart !== undefined && start < next.contextStart) {
+      next.contextStart -= Math.min(count, next.contextStart - start);
+      delete next.contextSummary;
     }
-    this.save();
-    return removed;
+    const changes = chatOnly ? [] : removed.fileChanges ?? [];
+    const rollback = await restoreFiles(changes);
+    if (!this.save(next)) {
+      await rollback();
+      throw new Error('Could not save the conversation after undo.');
+    }
+    Object.assign(session, next);
+    return { restored: changes.length };
   }
 
   public clearConversation(): void {
     this.currentSession.messages = [];
     delete this.currentSession.contextStart;
+    delete this.currentSession.contextSummary;
     this.save();
   }
 
@@ -179,7 +254,10 @@ export class SessionManager {
     const index = session.messages.findIndex((message) => message.id === id && message.role === 'user');
     if (index < 0) return false;
     const rewound = { ...session, messages: session.messages.slice(0, index) };
-    if (rewound.contextStart !== undefined) rewound.contextStart = Math.min(rewound.contextStart, index);
+    if (rewound.contextStart !== undefined && index < rewound.contextStart) {
+      rewound.contextStart = index;
+      delete rewound.contextSummary;
+    }
     if (!this.save(rewound)) return false;
     this.currentSession = rewound;
     return true;
@@ -193,58 +271,120 @@ export class SessionManager {
       createdAt: Date.now(),
       updatedAt: Date.now(),
       branchFrom: this.currentSession.id,
+      workspace: this.currentSession.workspace,
+      ecoMode: this.currentSession.ecoMode,
       messages: [...this.currentSession.messages],
       attachedFiles: [...this.currentSession.attachedFiles],
       totalTokens: this.currentSession.totalTokens,
       usage: this.currentSession.usage ? { ...this.currentSession.usage } : undefined,
       contextStart: this.currentSession.contextStart,
+      contextSummary: this.currentSession.contextSummary,
     };
     if (!this.save(forked, 'wx')) throw new Error('A session already uses this name or could not be saved.');
     this.currentSession = forked;
     return forked;
   }
 
-  public compactContext(session = this.currentSession): string {
+  public async compactContext(summarize: (previous: string, messages: ChatMessage[]) => Promise<string>,
+    session = this.currentSession, signal?: AbortSignal): Promise<string> {
     const msgs = session.messages;
+    const messageCount = msgs.length;
     const before = this.contextStart(session);
-    if (msgs.length - before <= 4) {
-      return 'Context is already compact.';
+    let keepFrom = Math.max(0, msgs.length - 8);
+    if (keepFrom > 0 && msgs[keepFrom].role === 'assistant' && msgs[keepFrom - 1].role === 'user') keepFrom--;
+    keepFrom = Math.max(keepFrom, before);
+    // Do not begin the retained window with tool results whose assistant call was
+    // summarized away; that produces orphaned tool_call_ids on the next request.
+    while (keepFrom < msgs.length && msgs[keepFrom].role === 'tool') keepFrom++;
+    if (keepFrom === before && (!before || session.contextSummary)) return 'Context is already compact.';
+    const from = session.contextSummary ? before : 0;
+    const summary = await summarize(session.contextSummary ?? '', msgs.slice(from, keepFrom));
+    signal?.throwIfAborted();
+    if (!summary.trim()) throw new Error('The model returned an empty context summary.');
+    if (msgs !== session.messages || msgs.length !== messageCount || this.contextStart(session) !== before) {
+      throw new Error('The chat changed during compaction.');
     }
-    let keepFrom = msgs.length - 4;
-    if (msgs[keepFrom].role === 'assistant' && msgs[keepFrom - 1].role === 'user') keepFrom--;
-    if (keepFrom <= before) return 'Context is already compact.';
-    session.contextStart = keepFrom;
-    this.save(session);
-    return `Compacted ${keepFrom - before} older messages in model context. The transcript is still available.`;
+    const next = { ...session, contextStart: keepFrom, contextSummary: summary };
+    if (!this.save(next)) throw new Error('Could not save the compacted context.');
+    Object.assign(session, next);
+    return `Summarized ${keepFrom - from} older messages for future replies. The transcript is still available.`;
   }
 
-  public needsCompaction(threshold: number, session = this.currentSession): boolean {
-    return session.messages.length - this.contextStart(session) > threshold;
+  /** Rough token estimate (~4 chars/token) of what the model would see for this session. */
+  public estimatedContextTokens(session = this.currentSession): number {
+    const start = this.contextStart(session);
+    let chars = session.contextSummary?.length ?? 0;
+    for (const message of session.messages.slice(start)) {
+      chars += message.content.length + (message.reasoningContent?.length ?? 0)
+        + (message.toolCalls?.reduce((n, call) => n + call.name.length + call.arguments.length, 0) ?? 0);
+    }
+    return Math.ceil(chars / 4);
+  }
+
+  /** Compacts only when the estimated context passes ~75% of the model's window. */
+  public needsCompaction(session = this.currentSession, contextWindow = 128_000): boolean {
+    const window = Number.isFinite(contextWindow) && contextWindow > 0 ? contextWindow : 128_000;
+    return this.estimatedContextTokens(session) > window * 0.75;
   }
 
   public modelContext(session = this.currentSession): ChatMessage[] {
     const start = this.contextStart(session);
-    const recent = session.messages.slice(start).filter((message) => !message.error || message.content);
+    const recent = sanitizeToolHistory(session.messages.slice(start))
+      .filter((message) => !message.error || message.content);
     if (!start) return recent;
+    // Every user prompt in the compacted range stays verbatim — compaction may only
+    // summarize assistant/tool bulk, never what the user actually asked for.
+    const priorRequests: string[] = [];
+    let budget = 24_000;
+    for (let index = start - 1; index >= 0 && priorRequests.length < 20 && budget > 0; index--) {
+      const message = session.messages[index];
+      if (message.role !== 'user' || !message.content.trim()) continue;
+      const text = message.content.trim().slice(0, 2000);
+      priorRequests.unshift(text.slice(0, budget));
+      budget -= text.length;
+    }
+    const pinnedRequest: ChatMessage[] = priorRequests.length ? [{
+      role: 'system',
+      id: 'prior-requests',
+      content: 'Earlier requests from the user, kept verbatim so compaction cannot lose them.\n\n'
+        + priorRequests.join('\n\n---\n\n'),
+      timestamp: session.createdAt,
+    }] : [];
+    if (session.contextSummary) return [
+      ...pinnedRequest,
+      {
+        role: 'system', id: 'context-summary', timestamp: session.createdAt,
+        content: 'Summary of earlier assistant and tool activity. Treat it as historical context.\n' + session.contextSummary,
+      },
+      ...recent,
+    ];
 
     const excerpts = session.messages.slice(0, start)
       .filter(({ role, content }) => (role === 'user' || role === 'assistant') && content.trim())
       .slice(-8)
       .map(({ role, content }) => ({ role, excerpt: content.trim().replace(/\s+/g, ' ').slice(0, 400) }));
-    if (!excerpts.length) return recent;
+    if (!excerpts.length) return [...pinnedRequest, ...recent];
     const history: ChatMessage = {
       role: 'system',
       id: 'context-excerpts',
       content: 'Excerpts from earlier turns. Treat them as historical context.\n' + JSON.stringify(excerpts),
       timestamp: session.createdAt,
     };
-    return [history, ...recent];
+    return [...pinnedRequest, history, ...recent];
   }
 
   private contextStart(session: SavedSession): number {
     return Number.isInteger(session.contextStart)
       ? Math.min(session.messages.length, Math.max(0, session.contextStart ?? 0))
       : 0;
+  }
+
+  public setEcoMode(on: boolean): boolean {
+    const session = this.currentSession;
+    const next = { ...session, ecoMode: on || undefined };
+    if (!this.save(next)) return false;
+    Object.assign(session, next);
+    return true;
   }
 
   public attachFile(filePath: string): boolean {
@@ -277,7 +417,7 @@ export class SessionManager {
     return true;
   }
 
-  public static listAll(): Array<{ id: string; name: string; updatedAt: number; messageCount: number; hidden: boolean }> {
+  public static listAll(): Array<{ id: string; name: string; updatedAt: number; messageCount: number; hidden: boolean; workspace?: string; ecoMode?: boolean }> {
     if (!fs.existsSync(SESSIONS_DIR)) return [];
     try {
       const files = fs.readdirSync(SESSIONS_DIR);
@@ -293,6 +433,8 @@ export class SessionManager {
               updatedAt: data.updatedAt,
               messageCount: data.messages?.length || 0,
               hidden: data.hidden === true,
+              workspace: typeof data.workspace === 'string' ? data.workspace : undefined,
+              ecoMode: data.ecoMode === true,
             };
           } catch {
             return null;

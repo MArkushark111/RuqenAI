@@ -1,18 +1,26 @@
 import { exec, execFile } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import fs from 'node:fs/promises';
 import path from 'node:path';
 import { promisify } from 'node:util';
-import { PermissionMode } from '../types/index.js';
+import type { FileCheckpoint, PermissionMode } from '../types/index.js';
 import { permissionManager } from './permissions.js';
 
 export interface WorkspaceActionOptions {
   cwd?: string;
   signal?: AbortSignal;
   permissionMode?: PermissionMode;
+  onFileChange?: (change: FileCheckpoint) => void;
 }
 
 export class ActionDeniedError extends Error {}
+
+export function imageMediaType(bytes: Buffer): string | undefined {
+  if (bytes.subarray(0, 8).toString('hex') === '89504e470d0a1a0a') return 'image/png';
+  if (bytes.subarray(0, 3).toString('hex') === 'ffd8ff') return 'image/jpeg';
+  if (/^GIF8[79]a$/.test(bytes.subarray(0, 6).toString('ascii'))) return 'image/gif';
+  if (bytes.toString('ascii', 0, 4) === 'RIFF' && bytes.toString('ascii', 8, 12) === 'WEBP') return 'image/webp';
+}
 
 const execAsync = promisify(exec);
 const execFileAsync = promisify(execFile);
@@ -157,20 +165,76 @@ export async function searchWorkspace(query: string, directory: string, options:
   return matches.join('\n') || 'No matches.';
 }
 
-function lineChanges(before: string, after: string) {
-  const lines = (text: string) => text.replace(/\r\n?/g, '\n').match(/[^\n]*\n|[^\n]+$/g) ?? [];
-  const oldLines = lines(before);
-  const newLines = lines(after);
-  if (!oldLines.length || !newLines.length) return { added: newLines.length, removed: oldLines.length };
-  const parts = diffArrays(oldLines, newLines, { timeout: 250 });
-  if (!parts) return undefined;
+function contentHash(content: string): string {
+  return createHash('sha256').update(content).digest('hex');
+}
+
+export async function restoreFiles(checkpoints: FileCheckpoint[]): Promise<() => Promise<void>> {
+  const files = await Promise.all(checkpoints.map(async (change) => {
+    if (change.before === undefined) throw new Error('No original copy was saved for ' + change.path);
+    const target = await workspacePath(change.cwd, change.path);
+    if (target !== change.path) throw new Error('The file location changed: ' + change.path);
+    const current = await readText(target);
+    if (contentHash(current) !== change.afterHash) throw new Error('The file changed since the turn: ' + change.path);
+    return { change, target, current, before: change.before };
+  }));
+  const restored: typeof files = [];
+  async function rollback() {
+    for (const file of [...restored].reverse()) {
+      if (await workspacePath(file.change.cwd, file.target, true) !== file.target) {
+        throw new Error('The file location changed during rollback: ' + file.target);
+      }
+      const current = await readText(file.target).catch((error: NodeJS.ErrnoException) => {
+        if (error.code !== 'ENOENT') throw error;
+        return null;
+      });
+      if (current !== file.before) throw new Error('The file changed during rollback: ' + file.target);
+      await writeText(file.target, file.current);
+    }
+  }
+  try {
+    for (const file of files) {
+      if (await workspacePath(file.change.cwd, file.target) !== file.target
+        || await readText(file.target) !== file.current) throw new Error('The file changed during undo: ' + file.target);
+      if (file.before === null) await fs.unlink(file.target);
+      else await writeText(file.target, file.before);
+      restored.push(file);
+    }
+  } catch (error) {
+    await rollback();
+    throw error;
+  }
+  return rollback;
+}
+
+function fileDiff(before: string, after: string) {
+  const normalize = (text: string) => text.replace(/\r\n?/g, '\n');
+  const patch = structuredPatch('', '', normalize(before), normalize(after), undefined, undefined,
+    { context: 3, timeout: 250 });
+  if (!patch) return {};
   let added = 0;
   let removed = 0;
-  for (const part of parts) {
-    if (part.added) added += part.count;
-    if (part.removed) removed += part.count;
+  const lines: string[] = [];
+  let size = 0;
+  let truncated = false;
+  function append(line: string) {
+    if (truncated || size + line.length + 1 > 128_000) {
+      truncated = true;
+      return;
+    }
+    lines.push(line);
+    size += line.length + 1;
   }
-  return { added, removed };
+  for (const hunk of patch.hunks) {
+    append(`@@ -${hunk.oldStart},${hunk.oldLines} +${hunk.newStart},${hunk.newLines} @@`);
+    for (const line of hunk.lines) {
+      if (line.startsWith('+')) added++;
+      if (line.startsWith('-')) removed++;
+      append(line);
+    }
+  }
+  if (truncated) lines.push('… diff preview truncated');
+  return { changes: { added, removed }, diff: lines.join('\n') };
 }
 
 export async function writeWorkspaceFile(file: string, content: string, options: WorkspaceActionOptions) {
@@ -182,11 +246,12 @@ export async function writeWorkspaceFile(file: string, content: string, options:
   if (!allowed) throw new ActionDeniedError('File write denied by permission settings.');
   if (await workspacePath(cwd, file, true) !== target) throw new Error('File target changed while awaiting approval');
   const before = await readText(target, options.signal).catch((error: NodeJS.ErrnoException) =>
-    error.code === 'ENOENT' ? '' : undefined);
+    error.code === 'ENOENT' ? null : undefined);
   await fs.mkdir(path.dirname(target), { recursive: true });
   await writeText(target, content, options.signal);
+  if (before !== content) options.onFileChange?.({ cwd, path: target, before, afterHash: contentHash(content) });
   return { text: 'Wrote ' + path.relative(cwd, target) + ' (' + Buffer.byteLength(content) + ' bytes).',
-    changes: before === undefined ? undefined : lineChanges(before, content) };
+    ...(before === undefined ? {} : fileDiff(before ?? '', content)) };
 }
 
 export async function editWorkspaceFile(
@@ -210,9 +275,10 @@ export async function editWorkspaceFile(
   if (!replaceAll && parts.length > 2) throw new Error('old_text appears more than once. Include more context or request all matches.');
   const next = parts.join(newText);
   if (Buffer.byteLength(next) > maxFileBytes) throw new Error('Updated file exceeds 1 MB');
-  if (next === current) return { text: 'No changes in ' + path.relative(cwd, target) + '.', changes: { added: 0, removed: 0 } };
+  if (next === current) return { text: 'No changes in ' + path.relative(cwd, target) + '.', changes: { added: 0, removed: 0 }, diff: '' };
   await writeText(target, next, options.signal);
-  return { text: 'Edited ' + path.relative(cwd, target) + ' (' + (parts.length - 1) + ' replacement(s)).', changes: lineChanges(current, next) };
+  options.onFileChange?.({ cwd, path: target, before: current, afterHash: contentHash(next) });
+  return { text: 'Edited ' + path.relative(cwd, target) + ' (' + (parts.length - 1) + ' replacement(s)).', ...fileDiff(current, next) };
 }
 
 export async function runShellCommand(
@@ -241,4 +307,4 @@ export async function runShellCommand(
     };
   }
 }
-import { diffArrays } from 'diff';
+import { structuredPatch } from 'diff';

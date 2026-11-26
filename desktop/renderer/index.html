@@ -1,0 +1,221 @@
+<!DOCTYPE html>
+<html lang="en" data-theme="porcelain">
+  <head>
+    <meta charset="UTF-8" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self'; font-src 'self'; img-src 'self' data:; media-src 'self' file: blob:;"
+    />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Ruqenai</title>
+    <link rel="stylesheet" href="./styles.css" />
+  </head>
+  <body data-platform="unknown">
+    <div id="startup-screen" role="status" aria-live="polite">
+      <img src="./logo.png" alt="" class="startup-mark" />
+      <span class="startup-name">Ruqenai</span>
+      <span class="startup-bars" aria-hidden="true"><i></i><i></i><i></i><i></i><i></i></span>
+      <span id="startup-label">Loading your workspace</span>
+    </div>
+    <div id="app">
+      <!-- Icon rail: navigation that never changes width. -->
+      <nav id="rail" aria-label="Primary">
+        <div class="rail-top">
+          <span class="rail-mark-box" aria-hidden="true">
+            <img class="rail-mark" src="./logo.png" alt="Ruqenai" />
+          </span>
+        </div>
+
+        <button id="rail-new" class="rail-btn" title="New chat (Ctrl N)" aria-label="New chat"></button>
+        <button
+          id="rail-chats"
+          class="rail-btn"
+          title="Chats and projects (Ctrl B)"
+          aria-label="Toggle chat list"
+          aria-expanded="true"
+        ></button>
+        <button id="rail-mentions" class="rail-btn" title="Manage — skills, MCP servers, models" aria-label="Manage"></button>
+        <button id="rail-providers" class="rail-btn" title="Providers" aria-label="Connect providers"></button>
+        <button
+          id="rail-inspector"
+          class="rail-btn"
+          title="Session details — actions, tokens, cost (Ctrl I)"
+          aria-label="Toggle session details"
+          aria-expanded="false"
+        ></button>
+
+
+        <div class="rail-gap"></div>
+
+        <button id="rail-theme" class="rail-btn" title="Switch theme" aria-label="Switch theme"></button>
+      </nav>
+
+      <!-- The ledger: projects and chats, collapsible. -->
+      <aside id="panel" aria-label="Workspace">
+        <header class="panel-top">
+          <span class="wordmark">Ruqenai</span>
+          <button id="panel-collapse" class="ghost-btn" title="Hide this panel" aria-label="Hide chat list"></button>
+        </header>
+
+        <button id="new-chat-btn" class="new-chat" title="New chat (Ctrl N)">
+          <span class="new-chat-label">New chat</span>
+        </button>
+
+        <div class="panel-search" id="panel-search">
+          <input id="chat-filter" type="search" placeholder="Filter chats…" spellcheck="false" aria-label="Filter chats" />
+        </div>
+
+        <div class="panel-scroll" id="panel-scroll">
+          <section class="nav-section">
+            <header class="section-head">
+              <span class="section-plain"><span class="section-label">Projects</span></span>
+              <button id="add-project-btn" class="ghost-btn sm" title="Add a project folder" aria-label="Add a project folder"></button>
+            </header>
+            <div id="projects-list" class="list"></div>
+          </section>
+
+          <section class="nav-section">
+            <header class="section-head">
+              <span class="section-plain"><span class="section-label">Chats</span></span>
+            </header>
+            <div id="chats-list" class="list"></div>
+          </section>
+        </div>
+      </aside>
+
+      <main id="main">
+        <div id="chat-backdrop" aria-hidden="true" hidden>
+          <canvas id="scene-canvas"></canvas>
+        </div>
+        <header id="topbar">
+<button id="topbar-menu" class="icon-btn" title="Chats and projects" aria-label="Toggle chat list"></button>
+          <div class="topbar-title">
+            <span id="chat-title">New chat</span>
+            <span id="chat-context" class="chat-context"></span>
+          </div>
+          <div id="topbar-actions">
+            <span id="busy-pill" class="busy hidden" aria-live="polite">
+              <span class="busy-dots" aria-hidden="true"><i></i><i></i><i></i></span>
+              <span id="busy-label">Working</span>
+            </span>
+            <button id="stop-btn" class="stop-btn hidden" title="Stop the current turn (Esc)">Stop</button>
+          </div>
+        </header>
+
+        <div id="scroller">
+          <div id="thread">
+            <div id="empty-state" class="empty">
+              <div class="hero">
+                <pre id="planet" class="planet" aria-hidden="true"></pre>
+                <div class="hero-copy">
+                  <h1 class="hero-title">What are we building?</h1>
+                  <p class="hero-sub">
+                    Ruqenai reads your files, runs the commands, and writes the change — asking first when it
+                    matters.
+                  </p>
+                </div>
+              </div>
+
+              <div class="starters" id="starters">
+                <button class="starter" data-prompt="Walk me through this repository. What are the main entry points?">
+                  <span class="starter-glyph" aria-hidden="true">→</span>
+                  <span class="starter-text">Explain this repository</span>
+                </button>
+                <button class="starter" data-prompt="Run the test suite and fix the first failure you find.">
+                  <span class="starter-glyph" aria-hidden="true">→</span>
+                  <span class="starter-text">Fix the failing test</span>
+                </button>
+                <button class="starter" data-prompt="Review the last change for bugs and edge cases.">
+                  <span class="starter-glyph" aria-hidden="true">→</span>
+                  <span class="starter-text">Review my last change</span>
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+
+        <footer id="composer">
+          <div id="todos" class="todos hidden">
+            <div class="todos-bar">
+              <button type="button" class="todos-head" aria-controls="todos-list" aria-expanded="false">
+                <span class="todos-title">To-dos</span>
+                <span class="todos-meta" aria-live="polite"></span>
+                <span class="todos-chev" aria-hidden="true"></span>
+              </button>
+              <button type="button" class="todos-clear" aria-label="Clear to-dos" title="Clear to-dos"></button>
+            </div>
+            <div class="todos-list" id="todos-list" hidden></div>
+          </div>
+          <div id="composer-box">
+            <div id="attach-tray" class="attach-tray hidden" aria-live="polite"></div>
+            <textarea
+              id="prompt"
+              rows="1"
+              placeholder="Ask Ruqenai to build, fix, or explain…"
+              spellcheck="false"
+              aria-label="Message Ruqenai"
+            ></textarea>
+            <div class="composer-row">
+              <button id="mention-btn" class="mention-chip" type="button" title="Mention a file, skill or MCP server" aria-label="Attach a file or mention a skill">+</button>
+              <button id="model-chip" class="model-chip" aria-haspopup="dialog" aria-expanded="false" title="Choose a model">
+                <span id="chip-mark" class="chip-mark" aria-hidden="true"></span>
+                <span id="chip-name" class="chip-name">Choose a model</span>
+                <span class="chip-chev" aria-hidden="true"></span>
+              </button>
+
+              <button id="effort-chip" class="effort-chip" aria-haspopup="dialog" aria-expanded="false" title="Reasoning effort">
+                <span id="effort-name">High</span>
+              </button>
+
+              <div id="mode-seg" class="segmented" role="group" aria-label="Permission mode">
+                <span class="seg-pill" aria-hidden="true"></span>
+                <button class="seg" data-mode="ask" title="Ask before every file write or command">Ask</button>
+                <button class="seg" data-mode="approve" title="Ask only for risky actions">Approve</button>
+                <button class="seg" data-mode="full" title="Run without stopping to ask">Full</button>
+              </div>
+
+              <div class="composer-right">
+                <span id="composer-note" class="composer-note"></span>
+                <button id="send-btn" class="send" title="Send (Enter)" aria-label="Send message"></button>
+              </div>
+            </div>
+          </div>
+          <div class="composer-meta">
+<!-- workspace chip removed -->
+            <button id="stats-bar" class="stats-bar" type="button" aria-label="Usage and context"></button>
+            <!-- meta separator removed -->
+            <!-- newline hint removed -->
+          </div>
+        </footer>
+      </main>
+
+      <!-- Session inspector: actions, tokens, cost. Collapsed by default. -->
+      <aside id="inspector" aria-label="Session details">
+        <header class="inspect-head">
+          <span class="inspect-title">Session</span>
+          <button id="inspect-close" class="ghost-btn sm" title="Close" aria-label="Close session details"></button>
+        </header>
+        <div class="inspect-body" id="inspect-body"></div>
+      </aside>
+    </div>
+
+    <div id="overlay" class="hidden" role="dialog" aria-modal="true"></div>
+
+    <!-- Small anchored popovers: chat actions and reasoning effort. -->
+    <div id="ctx-menu" class="ctx hidden" role="menu"></div>
+
+  <!-- @ mentions: workspace files, skills, MCP servers. -->
+  <div id="mentions" class="mentions hidden" role="listbox" aria-label="Mentions"></div>
+
+  <!-- Reasoning effort slider. -->
+  <div id="effort-pop" class="pop hidden" role="dialog" aria-label="Reasoning effort"></div>
+
+    <!-- Liquid model selector, anchored to the model chip. -->
+    <div id="model-sheet" class="sheet hidden" role="dialog" aria-modal="false" aria-label="Choose a model"></div>
+
+    <!-- Provider gallery. -->
+    <div id="providers-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="providers-title"></div>
+
+    <script src="./renderer.js"></script>
+  </body>
+</html>

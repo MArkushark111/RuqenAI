@@ -37,6 +37,8 @@ export interface ModelMetadata {
   supportsThinking?: boolean;
   chatSupport?: 'supported' | 'unsupported' | 'unknown';
   isDefault?: boolean;
+  releasedAt?: number;
+  deprecated?: boolean;
   description?: string;
 }
 
@@ -69,9 +71,11 @@ export interface ChatMessage {
   role: 'system' | 'user' | 'assistant' | 'tool';
   content: string;
   attachmentNames?: string[];
+  attachments?: { name: string; path: string }[];
   images?: Array<{ mediaType: string; data: string }>;
   reasoningContent?: string;
   segments?: readonly TranscriptSegment[];
+  fileChanges?: FileCheckpoint[];
   note?: string;
   error?: string;
   timestamp: number;
@@ -87,7 +91,15 @@ export interface ChatMessage {
 export type TranscriptSegment =
   | { kind: 'reasoning'; id: string; text: string; durationMs?: number }
   | { kind: 'text'; text: string }
+  | { kind: 'question'; question: string; answer?: string }
   | { kind: 'tool'; taskId: string };
+
+export interface FileCheckpoint {
+  cwd: string;
+  path: string;
+  before?: string | null;
+  afterHash: string;
+}
 
 export interface ToolDefinition {
   name: string;
@@ -111,7 +123,12 @@ export interface TaskItem {
   detail?: string;
   durationMs?: number;
   changes?: { added: number; removed: number };
+  diff?: string;
   exitCode?: number;
+  output?: string;
+  shellLog?: { command: string; cwd: string; stdout: string; stderr: string };
+  parentTaskId?: string;
+  subagent?: { name: string; assignment: string; transcript?: string };
 }
 
 export interface StreamChunk {
@@ -120,6 +137,7 @@ export interface StreamChunk {
   error?: string;
   toolCalls?: ToolCall[];
   isDone?: boolean;
+  finishReason?: string;
   usage?: ProviderUsage;
   tokensUsed?: number;
   costEstimate?: number;
@@ -143,4 +161,6 @@ export interface SkillDefinition {
   instructions: string;
   tags?: string[];
   filePath?: string;
+  /** Set when the skill is a folder containing SKILL.md plus reference files. */
+  dirPath?: string;
 }

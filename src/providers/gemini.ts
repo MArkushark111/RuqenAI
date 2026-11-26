@@ -31,8 +31,10 @@ function geminiHistory(messages: ChatMessage[]) {
           response: message.error ? { error: message.error } : { result: message.content },
         },
       };
-      if (contents.at(-1)?.parts[0]?.functionResponse) contents.at(-1)?.parts.push(part);
-      else contents.push({ role: 'user', parts: [part] });
+      const parts = [part, ...(message.images ?? []).map(({ mediaType, data }): GeminiPart =>
+        ({ inlineData: { mimeType: mediaType, data } }))];
+      if (contents.at(-1)?.parts[0]?.functionResponse) contents.at(-1)?.parts.push(...parts);
+      else contents.push({ role: 'user', parts });
       continue;
     }
     const role = message.role === 'assistant' ? 'model' : 'user';
@@ -172,7 +174,7 @@ export class GeminiClient {
         return;
       }
       if (toolCalls.length) toolCalls[0].providerData = parts;
-      yield { isDone: true, usage, toolCalls: toolCalls.length ? toolCalls : undefined };
+      yield { isDone: true, finishReason: stopReason, usage, toolCalls: toolCalls.length ? toolCalls : undefined };
     } catch (error) {
       options.signal?.throwIfAborted();
       yield { error: describeStreamError('Gemini', error, apiKey) };

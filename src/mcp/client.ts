@@ -109,14 +109,31 @@ function pluginFile(name: string) {
   return path.join(configDirectory, 'plugins', name + '.json');
 }
 
-export function installMcpPlugin(source: string): string {
+export function prepareMcpPlugin(source: string, restrictToSource = false) {
   const target = path.resolve(source);
   const directory = fs.statSync(target).isDirectory();
   const root = directory ? target : path.dirname(target);
-  const manifest = readRecord(readJson(directory ? path.join(target, '.claude-plugin', 'plugin.json') : target));
-  const raw = directory && manifest?.mcpServers === undefined ? readRecord(readJson(path.join(target, '.mcp.json'))) : manifest;
+  const readManifest = (file: string) => {
+    if (restrictToSource) {
+      let real: string;
+      try {
+        real = fs.realpathSync(file);
+      } catch (error) {
+        if ((error as NodeJS.ErrnoException).code === 'ENOENT') return {};
+        throw error;
+      }
+      const relative = path.relative(root, real);
+      if (relative === '..' || relative.startsWith('..' + path.sep) || path.isAbsolute(relative)) {
+        throw new Error('Plugin configuration must be inside the source directory.');
+      }
+      return readRecord(readJson(real));
+    }
+    return readRecord(readJson(file));
+  };
+  const manifest = readManifest(directory ? path.join(target, '.claude-plugin', 'plugin.json') : target);
+  const raw = directory && manifest?.mcpServers === undefined ? readManifest(path.join(target, '.mcp.json')) : manifest;
   const declared = raw?.mcpServers ?? raw?.servers ?? (directory && raw !== manifest ? raw : undefined);
-  const config = typeof declared === 'string' ? readRecord(readJson(path.resolve(root, declared))) : undefined;
+  const config = typeof declared === 'string' ? readManifest(path.resolve(root, declared)) : undefined;
   const specs = parseServers(config ? config.mcpServers ?? config.servers ?? config : declared);
   if (!specs.length) throw new Error('The plugin must declare local stdio MCP servers.');
   const expand = (value: string) => value.replaceAll('${CLAUDE_PLUGIN_ROOT}', () => root);
@@ -127,8 +144,18 @@ export function installMcpPlugin(source: string): string {
     description,
   }]));
   const name = typeof manifest?.name === 'string' ? manifest.name : path.basename(target, directory ? undefined : '.json');
-  saveJson(pluginFile(name), { name, description: manifest?.description, mcpServers: servers }, true);
-  return name;
+  pluginFile(name);
+  return { name, description: manifest?.description, mcpServers: servers };
+}
+
+export function saveMcpPlugin(plugin: ReturnType<typeof prepareMcpPlugin>) {
+  saveJson(pluginFile(plugin.name), plugin, true);
+}
+
+export function installMcpPlugin(source: string): string {
+  const plugin = prepareMcpPlugin(source);
+  saveMcpPlugin(plugin);
+  return plugin.name;
 }
 
 export function updateMcpPlugin(name: string, enabled?: boolean) {
@@ -337,7 +364,8 @@ export class McpClient {
   ): Promise<T> {
     const server = this.readConfiguration().servers.get(name);
     if (!server) throw new Error('Unknown MCP server ' + name);
-    const allowed = await permissionManager.checkPermission('network', name, description, signal, mode);
+    const allowed = await permissionManager.checkPermission('network', name, description, signal, mode,
+      ['use-server', process.cwd(), server, description]);
     signal?.throwIfAborted();
     if (!allowed) throw new McpPermissionError('MCP action denied by permission settings.');
 
